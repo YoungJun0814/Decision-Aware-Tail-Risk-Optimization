@@ -9,6 +9,8 @@ This project aims to optimize tail risk in a decision-aware manner using deep le
     - `processed/`: Processed data
 - `notebooks/`: Jupyter notebooks for experiments
 - `src/`: Source code including data loaders, models, and optimization logic
+- `main.py`: Main entry point for the pipeline
+- `verify_env.py`: Script to verify installed dependencies
 - `README.md`: Project documentation
 - `requirements.txt`: Python dependencies
 
@@ -46,23 +48,3 @@ Run the main pipeline to check if everything is working:
 python main.py
 ```
 If you see **"Epoch 1 complete"**, the environment is set up correctly.
-
----
-
-## Team Roles & Responsibilities
-
-### Role A: Lead AI Architect (Tech & System) - *DONE*
-- **Status**: ✅ Pipeline Implemented
-- **Work**: Data loader, Model skeleton, End-to-End loop, Infrastructure.
-
-### Role B: Quantitative Risk Researcher (Math & Theory) - *Action Required*
-- **Status**: 🚧 **TODO**
-- **Files to Modify**:
-    - `src/optimization.py`: Implement `CVaROptimizationLayer` logic.
-    - `src/loss.py`: Define `CVaRLoss` or Utility Function.
-
-### Role C: Global Macro Strategist (Market & Insight) - *Action Required*
-- **Status**: 🚧 **TODO**
-- **Files to Modify**:
-    - `src/data_loader.py`: Fill `MACRO_TICKERS` list (e.g., `^VIX`, `DXY`...).
-    - **Analysis**: Interpret backtest results in `main.py` output.
