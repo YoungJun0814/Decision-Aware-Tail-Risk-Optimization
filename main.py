@@ -1,13 +1,13 @@
 """
-Decision-Aware Tail Risk Optimization
-=====================================
+Decision-Aware Tail Risk Optimization (v2)
+===========================================
 Main entry point for the project.
 
 이 파일은 전체 파이프라인을 연결하고 실행합니다:
-1. 데이터 로딩 (data_loader.py)
+1. 데이터 로딩 (data_loader.py) - VIX 포함
 2. 모델 생성 (models.py)
 3. 최적화 레이어 연결 (optimization.py)
-4. 학습 실행 (trainer.py + loss.py)
+4. 학습 실행 (trainer.py + loss.py) - DecisionAwareLoss 사용
 5. 벤치마크 비교 (benchmark_mvo.py)
 
 Usage:
@@ -26,10 +26,11 @@ warnings.filterwarnings('ignore')
 from src.data_loader import (
     prepare_training_data, 
     get_monthly_asset_data,
-    ASSET_TICKERS
+    ASSET_TICKERS,
+    INVERSE_ETF_INDEX
 )
 from src.models import DecisionAwareNet
-from src.loss import TaskLoss
+from src.loss import DecisionAwareLoss, TaskLoss  # v2: DecisionAwareLoss 추가
 from src.trainer import Trainer, create_dataloaders
 
 
@@ -38,7 +39,7 @@ def main():
     메인 실행 함수
     """
     print("=" * 70)
-    print("  Decision-Aware Tail Risk Optimization")
+    print("  Decision-Aware Tail Risk Optimization (v2)")
     print("  End-to-End Learning Pipeline")
     print("=" * 70)
     
@@ -60,8 +61,13 @@ def main():
         'batch_size': 32,
         'learning_rate': 1e-3,
         'epochs': 50,
-        'risk_lambda': 1.0,
         'train_ratio': 0.8,
+        
+        # Loss 함수 설정 (DecisionAwareLoss v2)
+        'eta': 1.0,              # 리스크 페널티 가중치
+        'kappa_base': 0.001,     # 기본 거래비용 계수
+        'kappa_vix_scale': 0.0001,  # VIX 연동 거래비용 스케일
+        'rho': 0.01,             # 인버스 ETF 장기 보유 페널티
         
         # 기타
         'device': 'cuda' if torch.cuda.is_available() else 'cpu',
@@ -77,13 +83,14 @@ def main():
     np.random.seed(config['seed'])
     
     # =========================================================================
-    # Step 1: 데이터 로딩
+    # Step 1: 데이터 로딩 (v2: VIX 포함)
     # =========================================================================
     print("\n" + "=" * 70)
-    print("[Step 1] Loading and Preprocessing Data")
+    print("[Step 1] Loading and Preprocessing Data (v2: with VIX)")
     print("=" * 70)
     
-    X, y, scaler, asset_names = prepare_training_data(
+    # v2: prepare_training_data는 이제 vix_tensor도 반환합니다
+    X, y, vix, scaler, asset_names = prepare_training_data(
         start_date=config['start_date'],
         end_date=config['end_date'],
         seq_length=config['seq_length'],
@@ -93,10 +100,11 @@ def main():
     print(f"\nAssets: {asset_names}")
     print(f"X shape: {X.shape}  (Batch, Seq, Features)")
     print(f"y shape: {y.shape}  (Batch, Num_assets)")
+    print(f"VIX shape: {vix.shape}  (Batch,)")
     
-    # 데이터로더 생성
+    # v2: 데이터로더에 VIX도 포함
     train_loader, val_loader = create_dataloaders(
-        X, y, 
+        X, y, vix,  # VIX 추가
         batch_size=config['batch_size'],
         train_ratio=config['train_ratio']
     )
@@ -133,17 +141,27 @@ def main():
     print(f"  Total parameters: {total_params:,}")
     
     # =========================================================================
-    # Step 3: 손실 함수 및 옵티마이저
+    # Step 3: 손실 함수 및 옵티마이저 (v2: DecisionAwareLoss)
     # =========================================================================
     print("\n" + "=" * 70)
-    print("[Step 3] Setting up Loss Function and Optimizer")
+    print("[Step 3] Setting up Loss Function and Optimizer (v2)")
     print("=" * 70)
     
-    # TODO: Researcher가 Utility Function 정의하면 교체
-    loss_fn = TaskLoss(risk_lambda=config['risk_lambda'])
+    # v2: DecisionAwareLoss 사용 (VIX 연동 거래비용 + 인버스 페널티)
+    loss_fn = DecisionAwareLoss(
+        eta=config['eta'],
+        kappa_base=config['kappa_base'],
+        kappa_vix_scale=config['kappa_vix_scale'],
+        rho=config['rho'],
+        inverse_etf_index=INVERSE_ETF_INDEX
+    )
     optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'])
     
-    print(f"\nLoss Function: TaskLoss (risk_lambda={config['risk_lambda']})")
+    print(f"\nLoss Function: DecisionAwareLoss")
+    print(f"  - eta (Risk): {config['eta']}")
+    print(f"  - kappa_base (Transaction Cost): {config['kappa_base']}")
+    print(f"  - kappa_vix_scale (VIX Scale): {config['kappa_vix_scale']}")
+    print(f"  - rho (Inverse Decay): {config['rho']}")
     print(f"Optimizer: Adam (lr={config['learning_rate']})")
     
     # =========================================================================

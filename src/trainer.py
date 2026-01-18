@@ -45,10 +45,10 @@ class Trainer:
     
     def train_epoch(self, dataloader: DataLoader) -> float:
         """
-        한 에폭 학습
+        한 에폭 학습 (v2: VIX 지원)
         
         Args:
-            dataloader: 학습 데이터 로더
+            dataloader: 학습 데이터 로더 (X, y) 또는 (X, y, vix)
         
         Returns:
             epoch_loss: 에폭 평균 손실
@@ -57,7 +57,15 @@ class Trainer:
         total_loss = 0.0
         num_batches = 0
         
-        for batch_X, batch_y in dataloader:
+        for batch in dataloader:
+            # v2: 배치 언패킹 (VIX 포함 여부에 따라 다름)
+            if len(batch) == 3:
+                batch_X, batch_y, batch_vix = batch
+                batch_vix = batch_vix.to(self.device)
+            else:
+                batch_X, batch_y = batch
+                batch_vix = None
+            
             batch_X = batch_X.to(self.device)
             batch_y = batch_y.to(self.device)
             
@@ -67,8 +75,13 @@ class Trainer:
             # 2. Forward pass
             weights = self.model(batch_X)
             
-            # 3. 손실 계산
-            loss = self.loss_fn(weights, batch_y)
+            # 3. 손실 계산 (v2: DecisionAwareLoss는 vix 인자 필요)
+            if batch_vix is not None:
+                # DecisionAwareLoss 사용
+                loss = self.loss_fn(weights, batch_y, batch_vix)
+            else:
+                # Legacy TaskLoss 사용
+                loss = self.loss_fn(weights, batch_y)
             
             # 4. Backward pass
             loss.backward()
@@ -85,10 +98,10 @@ class Trainer:
     @torch.no_grad()
     def validate(self, dataloader: DataLoader) -> float:
         """
-        검증
+        검증 (v2: VIX 지원)
         
         Args:
-            dataloader: 검증 데이터 로더
+            dataloader: 검증 데이터 로더 (X, y) 또는 (X, y, vix)
         
         Returns:
             val_loss: 검증 손실
@@ -97,12 +110,25 @@ class Trainer:
         total_loss = 0.0
         num_batches = 0
         
-        for batch_X, batch_y in dataloader:
+        for batch in dataloader:
+            # v2: 배치 언패킹 (VIX 포함 여부에 따라 다름)
+            if len(batch) == 3:
+                batch_X, batch_y, batch_vix = batch
+                batch_vix = batch_vix.to(self.device)
+            else:
+                batch_X, batch_y = batch
+                batch_vix = None
+            
             batch_X = batch_X.to(self.device)
             batch_y = batch_y.to(self.device)
             
             weights = self.model(batch_X)
-            loss = self.loss_fn(weights, batch_y)
+            
+            # v2: DecisionAwareLoss는 vix 인자 필요
+            if batch_vix is not None:
+                loss = self.loss_fn(weights, batch_y, batch_vix)
+            else:
+                loss = self.loss_fn(weights, batch_y)
             
             total_loss += loss.item()
             num_batches += 1
@@ -187,16 +213,18 @@ class Trainer:
 def create_dataloaders(
     X: torch.Tensor,
     y: torch.Tensor,
+    vix: torch.Tensor = None,
     batch_size: int = 32,
     train_ratio: float = 0.8,
     shuffle: bool = True
 ) -> tuple:
     """
-    데이터로더 생성 헬퍼 함수
+    데이터로더 생성 헬퍼 함수 (v2: VIX 지원)
     
     Args:
-        X: 입력 텐서
-        y: 타겟 텐서
+        X: 입력 텐서 (Batch, Seq, Features)
+        y: 타겟 텐서 (Batch, Num_assets)
+        vix: VIX 텐서 (Batch,) - DecisionAwareLoss용
         batch_size: 배치 크기
         train_ratio: 학습 데이터 비율
         shuffle: 셔플 여부
@@ -211,9 +239,14 @@ def create_dataloaders(
     X_train, X_val = X[:n_train], X[n_train:]
     y_train, y_val = y[:n_train], y[n_train:]
     
-    # TensorDataset 생성
-    train_dataset = TensorDataset(X_train, y_train)
-    val_dataset = TensorDataset(X_val, y_val)
+    # TensorDataset 생성 (VIX 포함 여부에 따라 다름)
+    if vix is not None:
+        vix_train, vix_val = vix[:n_train], vix[n_train:]
+        train_dataset = TensorDataset(X_train, y_train, vix_train)
+        val_dataset = TensorDataset(X_val, y_val, vix_val)
+    else:
+        train_dataset = TensorDataset(X_train, y_train)
+        val_dataset = TensorDataset(X_val, y_val)
     
     # DataLoader 생성
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle)

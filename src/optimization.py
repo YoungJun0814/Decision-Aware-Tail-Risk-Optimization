@@ -30,7 +30,7 @@ except ImportError:
 
 class MinVarianceLayer(nn.Module):
     """
-    Minimum Variance Optimization Layer (Placeholder)
+    Minimum Variance Optimization Layer (with Safety Constraints)
     
     TODO: Researcher가 CVaR 수식 확정하면 교체할 예정
     
@@ -40,14 +40,24 @@ class MinVarianceLayer(nn.Module):
         minimize    w^T Σ w  (포트폴리오 분산)
         subject to  Σw = 1   (예산 제약)
                     w ≥ 0    (공매도 금지)
+                    w[SH] ≤ 0.3  (인버스 ETF 최대 비중 30%)
     
     Args:
         num_assets: 자산 개수
+        inverse_etf_index: 인버스 ETF 인덱스 (SH). 기본값 4
+        inverse_cap: 인버스 ETF 최대 비중. 기본값 0.3 (30%)
     """
     
-    def __init__(self, num_assets: int):
+    def __init__(
+        self, 
+        num_assets: int, 
+        inverse_etf_index: int = 4,
+        inverse_cap: float = 0.3
+    ):
         super(MinVarianceLayer, self).__init__()
         self.num_assets = num_assets
+        self.inverse_etf_index = inverse_etf_index
+        self.inverse_cap = inverse_cap
         self.cvxpy_layer = None
         
         if CVXPY_AVAILABLE:
@@ -78,9 +88,12 @@ class MinVarianceLayer(nn.Module):
         # 제약조건
         constraints = [
             cp.sum(w) == 1,  # 예산 제약: 비중 합 = 1
+            # ======================================================================
+            # Safety Constraint: 인버스 ETF(SH) 최대 비중 제한 (Hard Stop)
+            # 이 제약은 Role B가 어떤 수식을 개발하든 시스템 레벨에서 강제됩니다.
+            # ======================================================================
+            w[self.inverse_etf_index] <= self.inverse_cap,
             # TODO: Researcher가 추가 제약조건 정의
-            # w <= 0.4,  # 개별 자산 최대 비중 제한 (예시)
-            # TODO: 제약조건(Turnover 등) 확정되면 추가
         ]
         
         # 문제 정의
@@ -95,7 +108,7 @@ class MinVarianceLayer(nn.Module):
             variables=[w]
         )
         
-        print(f"[INFO] MinVarianceLayer built with {n} assets")
+        print(f"[INFO] MinVarianceLayer built with {n} assets (Inverse Cap: {self.inverse_cap*100:.0f}%)")
     
     def forward(self, Sigma: torch.Tensor) -> torch.Tensor:
         """

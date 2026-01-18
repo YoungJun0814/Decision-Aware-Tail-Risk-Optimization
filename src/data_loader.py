@@ -4,9 +4,14 @@ Data Loader Module
 [Step 1] 데이터 수집 및 전처리
 
 역할: 모델이 먹을 수 있는 형태로 데이터를 가공합니다.
-- Universe: SPY, TLT, GLD, DBC (4개 자산)
+- Universe: SPY, XLV, TLT, GLD, SH (5개 자산)
+  - SPY: S&P 500 (공격 자산)
+  - XLV: Healthcare (방어 섹터)
+  - TLT: 장기 국채 (안전 자산)
+  - GLD: 금 (인플레이션 헷지)
+  - SH: S&P 500 인버스 (하락장 헷지) - 주의: 장기 보유 시 Decay 발생
 - Frequency: 일간 -> 월말(Month-end) 리샘플링
-- Features: 자산 수익률 + 거시변수(Macro)
+- Features: 자산 수익률 + 거시변수(Macro) + VIX(Loss 함수용)
 - Output: (Batch_size, Sequence_length, Num_features) 형태의 텐서
 """
 
@@ -21,11 +26,23 @@ import torch
 # Configuration
 # =============================================================================
 
-# 자산 유니버스 (주식, 채권, 금, 원자재)
-ASSET_TICKERS = ['SPY', 'TLT', 'GLD', 'DBC']
+# 자산 유니버스 (5개 자산)
+# - SPY: S&P 500 ETF (공격)
+# - XLV: Healthcare ETF (방어 섹터)
+# - TLT: 20+ Year Treasury Bond ETF (안전 자산)
+# - GLD: Gold ETF (인플레이션 헷지)
+# - SH: S&P 500 Short ETF (하락장 헷지) - 인버스 ETF
+ASSET_TICKERS = ['SPY', 'XLV', 'TLT', 'GLD', 'SH']
+
+# 인버스 ETF 인덱스 (SH 위치) - 비중 제한(Cap) 적용 시 사용
+INVERSE_ETF_INDEX = 4  # SH is at index 4 (0-based)
+
+# VIX 티커 - Loss 함수의 Dynamic Transaction Cost 계산에 필수
+VIX_TICKER = '^VIX'
 
 # TODO: Strategist가 선정해주면 채워 넣을 것
-# 예시: ['^VIX', '^TNX', 'DX-Y.NYB'] (VIX, 10년물 금리, 달러 인덱스)
+# 예시: ['^TNX', 'DX-Y.NYB'] (10년물 금리, 달러 인덱스)
+# 주의: VIX는 별도로 처리하므로 여기에는 넣지 않음
 MACRO_TICKERS = []
 
 
@@ -82,10 +99,39 @@ def get_macro_data(tickers: list, start_date: str, end_date: str) -> pd.DataFram
         return pd.DataFrame()
     
     print(f"Downloading macro data for: {tickers}")
-    data = yf.download(tickers, start=start_date, end=end_date, progress=False)['Adj Close']
+    data = yf.download(tickers, start=start_date, end=end_date, progress=False, auto_adjust=True)['Close']
     monthly_macro = data.resample('ME').last().pct_change().dropna()
     
     return monthly_macro
+
+
+def get_vix_data(start_date: str, end_date: str) -> pd.Series:
+    """
+    VIX 데이터를 수집하는 함수 (Loss 함수용)
+    
+    Dynamic Transaction Cost ($\kappa(VIX)$) 계산을 위해 필요합니다.
+    VIX는 변화율이 아닌 '레벨' 그 자체를 사용합니다.
+    
+    Args:
+        start_date: 시작일
+        end_date: 종료일
+    
+    Returns:
+        월말 VIX 레벨 Series
+    """
+    print(f"[INFO] Downloading VIX data for Loss function...")
+    
+    try:
+        vix_data = yf.download(VIX_TICKER, start=start_date, end=end_date, progress=False)['Close']
+        # 월말 기준 리샘플링 (VIX는 레벨 그대로 사용)
+        monthly_vix = vix_data.resample('ME').last()
+        # 결측치 앞뒤로 채우기 (VIX는 거의 없지만 안전장치)
+        monthly_vix = monthly_vix.ffill().bfill()
+        print(f"[INFO] VIX data range: {monthly_vix.index[0]} ~ {monthly_vix.index[-1]}")
+        return monthly_vix
+    except Exception as e:
+        print(f"[WARNING] VIX download failed: {e}. Using default VIX=20.")
+        return pd.Series()
 
 
 # =============================================================================
@@ -156,16 +202,20 @@ def prepare_training_data(
     Returns:
         X_tensor: (Batch, Seq, Features) PyTorch 텐서
         y_tensor: (Batch, Num_assets) PyTorch 텐서 (다음 달 수익률)
+        vix_tensor: (Batch,) PyTorch 텐서 (VIX 레벨 for Loss 함수)
         scaler: 정규화에 사용된 Scaler (역변환용)
         asset_names: 자산 이름 리스트
     """
     # 1. 자산 데이터 수집
     _, asset_returns = get_monthly_asset_data(ASSET_TICKERS, start_date, end_date)
     
-    # 2. 거시변수 데이터 수집 (비어있으면 스킵)
+    # 2. VIX 데이터 수집 (Loss 함수용 - 별도로 처리)
+    vix_data = get_vix_data(start_date, end_date)
+    
+    # 3. 거시변수 데이터 수집 (비어있으면 스킵)
     macro_returns = get_macro_data(MACRO_TICKERS, start_date, end_date)
     
-    # 3. 데이터 병합
+    # 4. 데이터 병합 (VIX는 별도 보관, 모델 입력에는 포함하지 않음)
     if not macro_returns.empty:
         # 인덱스 맞추기
         combined_data = pd.concat([asset_returns, macro_returns], axis=1).dropna()
@@ -175,27 +225,46 @@ def prepare_training_data(
     print(f"\n[INFO] Combined data shape: {combined_data.shape}")
     print(f"[INFO] Date range: {combined_data.index[0]} ~ {combined_data.index[-1]}")
     
-    # 4. 정규화
+    # 5. VIX 인덱스를 자산 데이터와 맞추기
+    if not vix_data.empty:
+        # combined_data 인덱스에 맞춤
+        vix_aligned = vix_data.reindex(combined_data.index).ffill().bfill()
+    else:
+        # VIX 다운로드 실패 시 기본값 20 사용
+        print("[WARNING] Using default VIX=20 for all periods.")
+        vix_aligned = pd.Series(20.0, index=combined_data.index)
+    
+    # 6. 정규화 (VIX는 정규화하지 않음 - 레벨 그대로 Loss에 사용)
     scaler = None
     if normalize:
         combined_data, scaler = normalize_data(combined_data)
     
-    # 5. 시퀀스 생성 (Lagging 포함)
+    # 7. 시퀀스 생성 (Lagging 포함)
     data_values = combined_data.values
     X, y = create_sequences(data_values, seq_length)
     
-    # 6. 타겟은 자산 수익률만 (Macro 제외)
+    # 8. VIX 시퀀스 생성 (타겟 시점의 VIX 사용)
+    vix_values = vix_aligned.values
+    vix_seq = []
+    for i in range(len(vix_values) - seq_length):
+        # 다음 달(타겟 시점)의 VIX 값
+        vix_seq.append(vix_values[i + seq_length])
+    vix_array = np.array(vix_seq)
+    
+    # 9. 타겟은 자산 수익률만 (Macro 제외)
     num_assets = len(ASSET_TICKERS)
     y_assets = y[:, :num_assets]  # 첫 N개 컬럼만 (자산 수익률)
     
-    # 7. PyTorch 텐서 변환
+    # 10. PyTorch 텐서 변환
     X_tensor = torch.tensor(X, dtype=torch.float32)
     y_tensor = torch.tensor(y_assets, dtype=torch.float32)
+    vix_tensor = torch.tensor(vix_array.flatten(), dtype=torch.float32)  # 1D 보장
     
     print(f"[INFO] X_tensor shape: {X_tensor.shape}")  # (Batch, Seq, Features)
     print(f"[INFO] y_tensor shape: {y_tensor.shape}")  # (Batch, Num_assets)
+    print(f"[INFO] vix_tensor shape: {vix_tensor.shape}")  # (Batch,)
     
-    return X_tensor, y_tensor, scaler, ASSET_TICKERS
+    return X_tensor, y_tensor, vix_tensor, scaler, ASSET_TICKERS
 
 
 # =============================================================================
