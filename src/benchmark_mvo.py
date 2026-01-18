@@ -3,7 +3,6 @@ Benchmark MVO Module
 ====================
 벤치마크 구현: Mean-Variance Optimization (MVO)
 
-역할: 비교할 대상을 미리 세워둔다. (100% Tech Lead 권한)
 - PyPortfolioOpt 라이브러리를 사용한 MVO 구현
 - 샤프지수 최대화 포트폴리오 생성
 - 성과 지표 출력 (수익률, MDD, Sharpe Ratio)

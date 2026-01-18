@@ -3,7 +3,6 @@ Data Loader Module
 ==================
 [Step 1] 데이터 수집 및 전처리
 
-역할: 모델이 먹을 수 있는 형태로 데이터를 가공합니다.
 - Universe: SPY, XLV, TLT, GLD, SH (5개 자산)
   - SPY: S&P 500 (공격 자산)
   - XLV: Healthcare (방어 섹터)

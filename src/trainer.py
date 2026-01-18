@@ -3,7 +3,7 @@ Trainer Module
 ==============
 학습 루프 (Training Loop)
 
-역할: 자동으로 공부하는 시스템을 만든다.
+역할: 자동으로 공부하는 시스템을 만듭니다.
 - Epoch, Batch 반복문
 - optimizer.zero_grad() -> loss.backward() -> optimizer.step() 흐름
 """
