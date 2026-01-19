@@ -21,7 +21,7 @@ We use a specialized loss function that trains the AI based on the **final portf
 Our `DecisionAwareLoss` incorporates four key terms:
 - **Return Maximization:** $\max \mu^T w$
 - **Risk Minimization:** $\min \sigma_p$ (or CVaR)
-- **Dynamic Transaction Costs ($\kappa(\text{VIX})$):** Penalizes excessive trading, especially during high volatility (high VIX) to enforce stability.
+- **Dynamic Transaction Costs ($\kappa(VIX)$):** Penalizes excessive trading, especially during high volatility (high VIX) to enforce stability.
 - **Inverse Decay Penalty ($\rho$):** Penalizes long-term holding of Inverse ETFs (SH) to prevent value erosion from volatility drag.
 
 ### 3. Smart Asset Universe
