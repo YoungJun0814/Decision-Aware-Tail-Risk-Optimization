@@ -1,10 +1,7 @@
 # Decision-Aware Tail Risk Optimization
 
 > **Status:** Active Development (v2 Implementation Complete)  
-> **Roles:**
-> - **Tech Lead (Role A):** System Architecture & Pipeline (Complete)
-> - **Quant Researcher (Role B):** CVaR Optimization & Risk Modeling (Pending)
-> - **Strategist (Role C):** Macro Indicator Selection (Pending)
+
 
 ## 📖 Project Overview
 
@@ -24,7 +21,7 @@ We use a specialized loss function that trains the AI based on the **final portf
 Our `DecisionAwareLoss` incorporates four key terms:
 - **Return Maximization:** $\max \mu^T w$
 - **Risk Minimization:** $\min \sigma_p$ (or CVaR)
-- **Dynamic Transaction Costs ($\kappa(VIX)$):** Penalizes excessive trading, especially during high volatility (high VIX) to enforce stability.
+- **Dynamic Transaction Costs ($\kappa(\text{VIX})$):** Penalizes excessive trading, especially during high volatility (high VIX) to enforce stability.
 - **Inverse Decay Penalty ($\rho$):** Penalizes long-term holding of Inverse ETFs (SH) to prevent value erosion from volatility drag.
 
 ### 3. Smart Asset Universe
@@ -121,17 +118,4 @@ You can tune the hyperparameters in the `config` dictionary in `main.py`:
 
 ---
 
-## 🤝 Project Roles & Next Steps
 
-### ✅ Tech Lead (Role A) - **Done**
-- Constructed the foundational pipeline.
-- Implemented `DecisionAwareLoss` and VIX integration.
-- Enforced Safety Constraints (Inverse Cap).
-
-### ⏳ Quant Researcher (Role B) - **Next**
-- Define the `CVaR` optimization logic in `src/optimization.py`.
-- Refine the Risk term in `DecisionAwareLoss`.
-
-### ⏳ Strategist (Role C) - **Pending**
-- Select Macroeconomic indicators in `src/data_loader.py`.
-- Analyze regime-based performance behavior.
