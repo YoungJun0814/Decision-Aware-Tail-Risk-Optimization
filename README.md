@@ -35,6 +35,12 @@ A robust 5-asset universe covering all weather conditions:
 - **Hard Cap on Inverse ETF:** `w[SH] <= 0.3`. The AI cannot bet the farm on a market crash.
 - **No Short Selling:** Long-only portfolio (except for the implicit short via SH).
 
+### 5. Explainable AI (XAI) (`src/explainability.py`)
+To solve the "Black Box" problem, we provide a full suite of interpretability tools:
+- **Gradient Saliency:** Identifies which asset's past returns influenced the decision most.
+- **Attention Analysis:** Visualizes which past time steps (e.g., t-1 vs t-6) the model focused on.
+- **Counterfactual Scenarios:** Simulates "What if VIX doubled?" to ensure the model reacts defensively.
+
 ---
 
 ## 🛠 Directory Structure
