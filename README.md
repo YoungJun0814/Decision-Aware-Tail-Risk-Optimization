@@ -55,6 +55,7 @@ To solve the "Black Box" problem, we provide a full suite of interpretability to
 │   ├── loss.py             # DecisionAwareLoss implementation
 │   ├── models.py           # LSTM/Transformer Encoders
 │   ├── optimization.py     # Differentiable Optimization Layers (cvxpylayers)
+│   ├── explainability.py   # XAI Module (Saliency, Attention, Counterfactuals)
 │   ├── trainer.py          # Training Loop & Validation
 │   └── benchmark_mvo.py    # Classical Mean-Variance Benchmark
 ├── main.py                 # Entry point (End-to-End Pipeline)
