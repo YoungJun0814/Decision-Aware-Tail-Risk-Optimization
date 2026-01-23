@@ -1,0 +1,141 @@
+import pandas as pd
+import pandas_datareader.data as web
+import matplotlib.pyplot as plt
+import numpy as np
+from datetime import datetime
+
+class BinaryRegimePipe:
+    def __init__(self, start_date='1990-01-01'):
+        self.start = start_date
+        self.end = datetime.today().strftime('%Y-%m-%d')
+        self.df = pd.DataFrame()
+
+    def fetch_data(self):
+        print(f"--- [Binary Model] 데이터 수집 ({self.start} ~ {self.end}) ---")
+        try:
+            # 1. Price (Stooq)
+            df_stock = web.DataReader('^SPX', 'stooq', self.start, self.end).sort_index()
+            
+            # 2. Macro (FRED)
+            df_macro = web.DataReader(['VIXCLS', 'T10Y2Y'], 'fred', self.start, self.end)
+            
+            # Timezone Remove & Merge
+            df_stock.index = df_stock.index.tz_localize(None)
+            df_macro.index = df_macro.index.tz_localize(None)
+            
+            # Daily Merge -> Fill NaNs -> Monthly Resample
+            df_daily = pd.concat([df_stock['Close'], df_macro], axis=1).ffill()
+            
+            df_monthly = pd.DataFrame()
+            df_monthly['SP500'] = df_daily['Close'].resample('ME').last()
+            df_monthly['VIX'] = df_daily['VIXCLS'].resample('ME').mean()
+            df_monthly['Yield_Spread'] = df_daily['T10Y2Y'].resample('ME').mean()
+            
+            self.df = df_monthly.dropna()
+            print(f" -> 데이터 확보 완료: {len(self.df)}개월")
+            return self.df
+
+        except Exception as e:
+            print(f"Error: {e}")
+            return pd.DataFrame()
+
+    def apply_binary_logic(self):
+        if self.df.empty: return
+        
+        # 1. 기술적 지표
+        self.df['MA_10'] = self.df['SP500'].rolling(window=10).mean()
+        
+        # 2. Dynamic VIX Threshold 
+        self.df['VIX_Threshold'] = self.df['VIX'].rolling(window=36).quantile(0.80)
+        
+        data = self.df.dropna().copy()
+        regimes = []
+        current_state = 1 # Start with Bull (Risk-On)
+        
+        for i in range(len(data)):
+            row = data.iloc[i]
+            
+            # Conditions
+            is_uptrend = row['SP500'] > row['MA_10']
+            is_fear = row['VIX'] > row['VIX_Threshold']
+            is_inverted = row['Yield_Spread'] < 0.0
+            
+            next_state = current_state
+            
+            # -------------------------------------------------------
+            # [Binary Logic]
+            # 1: Bull (Green) / 0: Bear (Red)
+            # -------------------------------------------------------
+            
+            if current_state == 1: # [현재: Bull]
+                # Bear로 전환되려면 까다로운 조건 필요 (Hysteresis)
+                # 조건: 추세가 깨지고(AND) + (공포가 터지거나 OR 장단기 금리가 역전됨)
+                # 즉, "이유 없는 하락"은 위기로 보지 않고 버팀.
+                if not is_uptrend and (is_fear or is_inverted):
+                    next_state = 0
+            
+            elif current_state == 0: # [현재: Bear]
+                # Bull로 복귀하려면?
+                # 조건: 추세만 회복하면 복귀 (V자 반등을 놓치지 않기 위함)
+                if is_uptrend:
+                    next_state = 1
+            
+            regimes.append(next_state)
+            current_state = next_state
+            
+        data['Regime'] = regimes
+        self.df = data
+        return self.df
+
+    def validate_performance(self):
+        if 'Regime' not in self.df.columns: return
+        
+        self.df['Next_Ret'] = self.df['SP500'].pct_change().shift(-1)
+        
+        print("\n--- [Performance Check: 2-State Model] ---")
+        # 1 = Bull, 0 = Bear
+        stats = self.df.groupby('Regime')['Next_Ret'].agg(['count', 'mean', 'std'])
+        
+        stats['Ann_Return'] = stats['mean'] * 12 * 100
+        stats['Ann_Vol'] = stats['std'] * (12**0.5) * 100
+        stats['Sharpe'] = stats['Ann_Return'] / stats['Ann_Vol']
+        
+        label_map = {0: 'Bear (Cash)', 1: 'Bull (Equity)'}
+        stats.index = stats.index.map(label_map)
+        
+        print(stats[['count', 'Ann_Return', 'Sharpe']].round(2))
+        return stats
+
+    def visualize(self):
+        if self.df.empty: return
+        
+        df = self.df
+        plt.figure(figsize=(12, 6))
+        
+        # 선 그래프
+        plt.plot(df.index, df['SP500'], color='black', linewidth=1.5, label='S&P 500')
+        plt.plot(df.index, df['MA_10'], color='blue', linestyle='--', alpha=0.5, label='10 MA')
+        
+        # 배경색 (Binary)
+        # 0: Bear(Red), 1: Bull(Green)
+        colors = {0: '#ffcccc', 1: '#ccffcc'} 
+        
+        for i in range(len(df)):
+            date = df.index[i]
+            state = df['Regime'].iloc[i]
+            # 한 달치 영역 칠하기
+            plt.axvspan(date, date + pd.Timedelta(days=32), 
+                        facecolor=colors[state], edgecolor='none', alpha=0.5)
+
+        plt.title('Binary Tail Risk Model (Green: Risk-On, Red: Risk-Off)', fontsize=14)
+        plt.yscale('log')
+        plt.legend(loc='upper left')
+        plt.grid(True, alpha=0.3)
+        plt.show()
+
+if __name__ == "__main__":
+    pipe = BinaryRegimePipe()
+    pipe.fetch_data()
+    pipe.apply_binary_logic()
+    pipe.validate_performance()
+    pipe.visualize()
