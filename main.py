@@ -5,12 +5,12 @@ Main entry point for the project.
 
 이 파일은 전체 파이프라인을 연결하고 실행합니다:
 1. 데이터 로딩 (data_loader.py) - VIX 포함
-2. 모델 생성 (models.py)
-3. 최적화 레이어 연결 (optimization.py)
-4. 학습 실행 (trainer.py + loss.py) - DecisionAwareLoss 사용
-5. 벤치마크 비교 (benchmark_mvo.py)
+2. 모델 생성 (models.py) - TFT 및 벤치마크 모델
+3. 손실 함수 설정 (loss.py) - DecisionAwareLoss
+4. 학습 실행 (trainer.py)
+5. 결과 확인 및 저장
 
-Usage:
+사용법:
     python main.py
 """
 
@@ -29,8 +29,8 @@ from src.data_loader import (
     ASSET_TICKERS,
     INVERSE_ETF_INDEX
 )
-from src.models import DecisionAwareNet
-from src.loss import DecisionAwareLoss, TaskLoss  # v2: DecisionAwareLoss 추가
+from src.models import get_model  # v2.1: 모델 팩토리
+from src.loss import DecisionAwareLoss  # v2: DecisionAwareLoss 사용
 from src.trainer import Trainer, create_dataloaders
 
 
@@ -44,7 +44,7 @@ def main():
     print("=" * 70)
     
     # =========================================================================
-    # 설정
+    # 설정 (Configuration)
     # =========================================================================
     config = {
         # 데이터 설정
@@ -52,7 +52,8 @@ def main():
         'end_date': '2024-01-01',
         'seq_length': 12,  # 12개월 lookback
         
-        # 모델 설정
+        # 모델 설정 (lstm, gru, tcn, transformer, tft 중 선택)
+        'model_type': 'tft', 
         'hidden_dim': 64,
         'num_layers': 2,
         'dropout': 0.2,
@@ -67,7 +68,6 @@ def main():
         'eta': 1.0,              # 리스크 페널티 가중치
         'kappa_base': 0.001,     # 기본 거래비용 계수
         'kappa_vix_scale': 0.0001,  # VIX 연동 거래비용 스케일
-        'rho': 0.01,             # 인버스 ETF 장기 보유 페널티
         
         # 기타
         'device': 'cuda' if torch.cuda.is_available() else 'cpu',
@@ -122,15 +122,15 @@ def main():
     input_dim = X.shape[-1]  # Features 차원
     num_assets = len(asset_names)
     
-    model = DecisionAwareNet(
+    # v2.1: Model Factory 사용 (5 Benchmark Models)
+    model = get_model(
+        model_type=config['model_type'],
         input_dim=input_dim,
         num_assets=num_assets,
-        hidden_dim=config['hidden_dim'],
-        num_layers=config['num_layers'],
-        dropout=config['dropout']
+        device=config['device']
     )
     
-    print(f"\nModel Architecture:")
+    print(f"\nModel Architecture: {config['model_type'].upper()}")
     print(f"  Input dim: {input_dim}")
     print(f"  Hidden dim: {config['hidden_dim']}")
     print(f"  Num layers: {config['num_layers']}")
@@ -147,13 +147,11 @@ def main():
     print("[Step 3] Setting up Loss Function and Optimizer (v2)")
     print("=" * 70)
     
-    # v2: DecisionAwareLoss 사용 (VIX 연동 거래비용 + 인버스 페널티)
+    # v2: DecisionAwareLoss 사용 (VIX 연동 거래비용)
     loss_fn = DecisionAwareLoss(
         eta=config['eta'],
         kappa_base=config['kappa_base'],
-        kappa_vix_scale=config['kappa_vix_scale'],
-        rho=config['rho'],
-        inverse_etf_index=INVERSE_ETF_INDEX
+        kappa_vix_scale=config['kappa_vix_scale']
     )
     optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'])
     
@@ -161,7 +159,6 @@ def main():
     print(f"  - eta (Risk): {config['eta']}")
     print(f"  - kappa_base (Transaction Cost): {config['kappa_base']}")
     print(f"  - kappa_vix_scale (VIX Scale): {config['kappa_vix_scale']}")
-    print(f"  - rho (Inverse Decay): {config['rho']}")
     print(f"Optimizer: Adam (lr={config['learning_rate']})")
     
     # =========================================================================
@@ -222,9 +219,8 @@ def main():
     print("[SUCCESS] Training Complete!")
     print("=" * 70)
     print("\nNext Steps:")
-    print("  1. Run benchmark: python -m src.benchmark_mvo")
-    print("  2. TODO: Researcher가 CVaR 수식 확정하면 optimization.py 업데이트")
-    print("  3. TODO: Strategist가 Macro 변수 선정하면 data_loader.py 업데이트")
+    print("  1. Run benchmark: python src/benchmark.py")
+    print("  2. Run XAI Analysis: python run_xai.py")
 
 
 if __name__ == "__main__":
