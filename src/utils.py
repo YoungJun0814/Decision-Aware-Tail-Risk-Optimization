@@ -40,6 +40,35 @@ def get_device() -> str:
     else:
         return 'cpu'
 
+def calculate_mdd(returns):
+    """
+    최대 낙폭 (MDD) 계산
+    
+    Args:
+        returns: 수익률 배열 (1D numpy array or torch tensor)
+        
+    Returns:
+        mdd: 최대 낙폭 값 (양수, e.g., 0.2 means 20% drawdown)
+    """
+    if isinstance(returns, torch.Tensor):
+        returns = returns.cpu().numpy()
+        
+    # 누적 수익률 계산 (Cumulative Return)
+    # returns는 simple returns 가정: r_t = (P_t - P_{t-1}) / P_{t-1}
+    # cum_ret_t = (1 + r_1) * ... * (1 + r_t)
+    cum_ret = np.cumprod(1 + returns)
+    
+    # Running Max 계산
+    peak = np.maximum.accumulate(cum_ret)
+    
+    # Drawdown 계산
+    drawdown = (peak - cum_ret) / peak
+    
+    # Max Drawdown
+    mdd = np.max(drawdown)
+    
+    return mdd
+
 def backtest():
     pass
 

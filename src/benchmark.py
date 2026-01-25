@@ -22,7 +22,7 @@ from src.models import get_model
 from src.loss import DecisionAwareLoss
 from src.utils import set_seed, get_device
 
-def train_and_evaluate(model_type, config, X_tensor, y_tensor, vix_tensor):
+def train_and_evaluate(model_type, config, X_tensor, y_tensor, vix_tensor, scaler=None):
     """단일 모델 학습 및 평가"""
     device = config['device']
     input_dim = X_tensor.shape[-1]
@@ -49,7 +49,7 @@ def train_and_evaluate(model_type, config, X_tensor, y_tensor, vix_tensor):
     
     # 4. 학습 루프
     best_val_loss = float('inf')
-    patience = 10
+    patience = 20 # [MODIFIED] Early Stopping 조건을 10 -> 20으로 완화
     no_improve = 0
     val_weights = None  # 검증 결과 저장을 위한 변수 초기화
     
@@ -62,6 +62,10 @@ def train_and_evaluate(model_type, config, X_tensor, y_tensor, vix_tensor):
         
         loss.backward()
         optimizer.step()
+
+        # [LOGGING] 10 에포크마다 로그 출력
+        if (epoch + 1) % 10 == 0:
+            print(f"  Epoch [{epoch+1}/{config['epochs']}], Loss: {loss.item():.4f}")
         
         # 검증 (Validation)
         model.eval()
@@ -82,23 +86,39 @@ def train_and_evaluate(model_type, config, X_tensor, y_tensor, vix_tensor):
     print(f"  Best Val Loss: {best_val_loss:.4f}")
     
     # 5. 최종 지표 계산 (Validation Set 기준 Sharpe Ratio 등)
-    # 간단한 백테스트 성과 지표 산출
+    # [FIX] 스케일링된 데이터를 원복(De-normalization)하여 실제 수익률 계산
     if val_weights is not None:
-        portfolio_returns = (val_weights * y_val).sum(dim=1).cpu().numpy()
+        # y_val (Target)은 Scaled 상태이므로 원복 필요
+        if scaler is not None:
+            # scaler.mean_, scaler.scale_ 사용 (앞쪽 num_assets 개수만큼)
+            # y_val: (Batch, Assets)
+            mean = torch.tensor(scaler.mean_[:num_assets], device=device).float()
+            scale = torch.tensor(scaler.scale_[:num_assets], device=device).float()
+            y_val_real = y_val * scale + mean
+        else:
+            y_val_real = y_val
+
+        portfolio_returns = (val_weights * y_val_real).sum(dim=1).cpu().numpy()
         mean_ret = np.mean(portfolio_returns) * 12
         std_ret = np.std(portfolio_returns) * np.sqrt(12)
         sharpe = mean_ret / (std_ret + 1e-6)
+        
+        # MDD 계산
+        from src.utils import calculate_mdd
+        mdd = calculate_mdd(portfolio_returns)
     else:
         # 학습 실패 시
         mean_ret = 0.0
         sharpe = 0.0
+        mdd = 0.0
     
     return {
         'model': model_type,
         'val_loss': best_val_loss,
         'sharpe': sharpe,
         'annual_return': mean_ret,
-        'mdd': 0.0 # TODO: MDD 계산 로직 추가 필요
+        'mdd': mdd,
+        'val_returns': portfolio_returns if val_weights is not None else np.zeros(len(y_val))
     }
 
 def run_5_model_benchmark():
@@ -112,7 +132,7 @@ def run_5_model_benchmark():
         'dropout': 0.2,
         'batch_size': 32,
         'learning_rate': 0.001,
-        'epochs': 50, # 빠른 벤치마크를 위해 적절히 조정
+        'epochs': 100, 
         'train_ratio': 0.8,
         'eta': 1.0,
         'kappa_base': 0.001,
@@ -125,7 +145,7 @@ def run_5_model_benchmark():
     
     # 데이터 로드
     print("데이터 로딩 중...")
-    X_tensor, y_tensor, vix_tensor, scaler, asset_names = prepare_training_data(
+    X_tensor, y_tensor, vix_tensor, scaler, asset_names, y_dates = prepare_training_data(
         start_date=config['start_date'],
         end_date=config['end_date'],
         seq_length=config['seq_length']
@@ -145,7 +165,7 @@ def run_5_model_benchmark():
     
     for m in models:
         try:
-            res = train_and_evaluate(m, config, X_tensor, y_tensor, vix_tensor)
+            res = train_and_evaluate(m, config, X_tensor, y_tensor, vix_tensor, scaler) # scaler 전달
             results.append(res)
         except Exception as e:
             print(f"[{m.upper()}] 학습 실패: {e}")
@@ -167,6 +187,20 @@ def run_5_model_benchmark():
         print("\n결과가 benchmark_results.csv 파일로 저장되었습니다.")
     else:
         print("결과가 생성되지 않았습니다.")
+    
+    # [NEW] 시계열 수익률 저장 (Visualization용)
+    if results:
+        # Validation Dates 구하기
+        train_size = int(len(X_tensor) * config['train_ratio'])
+        val_dates = y_dates[train_size:]
+        
+        # DataFrame 생성
+        df_returns = pd.DataFrame(index=val_dates)
+        for res in results:
+            df_returns[res['model']] = res['val_returns']
+            
+        df_returns.to_csv("benchmark_returns.csv")
+        print("시계열 수익률 결과가 benchmark_returns.csv 파일로 저장되었습니다.")
 
 if __name__ == "__main__":
     run_5_model_benchmark()

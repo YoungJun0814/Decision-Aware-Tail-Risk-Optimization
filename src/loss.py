@@ -32,16 +32,19 @@ class DecisionAwareLoss(nn.Module):
         kappa_vix_scale (float): VIX에 따른 거래비용 스케일링 계수. 기본값 0.0001
     """
     
+
     def __init__(
         self,
         eta: float = 1.0,
         kappa_base: float = 0.001,
-        kappa_vix_scale: float = 0.0001
+        kappa_vix_scale: float = 0.0001,
+        risk_type: str = 'downside_deviation' # Options: 'std', 'downside_deviation', 'cvar'
     ):
         super(DecisionAwareLoss, self).__init__()
         self.eta = eta
         self.kappa_base = kappa_base
         self.kappa_vix_scale = kappa_vix_scale
+        self.risk_type = risk_type
     
     def compute_dynamic_cost(self, vix: torch.Tensor) -> torch.Tensor:
         """
@@ -89,9 +92,33 @@ class DecisionAwareLoss(nn.Module):
         return_loss = -portfolio_returns.mean()
         
         # ======================================================================
-        # Term 2: Risk (분산/표준편차)
+        # Term 2: Risk (선택 가능: std, downside_deviation, cvar)
         # ======================================================================
-        risk_penalty = portfolio_returns.std() + 1e-8  # 수치 안정성
+        if self.risk_type == 'std':
+            # 1. Standard Deviation (변동성)
+            risk_penalty = portfolio_returns.std() + 1e-8
+            
+        elif self.risk_type == 'cvar':
+            # 2. CVaR (Conditional Value at Risk) - 95%
+            # 배치 내 수익률을 정렬하여 하위 5%의 평균 손실 계산
+            alpha = 0.05
+            k = int(batch_size * alpha)
+            if k < 1: k = 1 # 최소 1개 샘플 보장
+            
+            sorted_returns, _ = torch.sort(portfolio_returns)
+            worst_returns = sorted_returns[:k]
+            cvar = -worst_returns.mean() # 손실이므로 음수 -> 양수로 변환
+            risk_penalty = cvar
+            
+        else: # 'downside_deviation' (Default)
+            # 3. Downside Deviation (하방 편차)
+            # 수익률 평균보다 낮은 경우(Downside)만 리스크로 간주
+            mean_return = portfolio_returns.mean()
+            downside_diff = portfolio_returns - mean_return
+            # 양수(수익이 평균보다 높음)는 0으로 처리, 음수(손실)는 제곱
+            downside_risk = torch.clamp(downside_diff, max=0.0) ** 2
+            risk_penalty = torch.sqrt(downside_risk.mean() + 1e-8)
+        
         
         # ======================================================================
         # Term 3: Dynamic Transaction Cost (VIX 연동 거래비용)

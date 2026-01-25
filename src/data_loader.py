@@ -199,11 +199,14 @@ def prepare_training_data(
     y_tensor = torch.tensor(y_assets, dtype=torch.float32)
     vix_tensor = torch.tensor(vix_array.flatten(), dtype=torch.float32)
     
+    # 11. 날짜 데이터 (Target 기준)
+    y_dates = combined_data.index[seq_length:]
+    
     print(f"[INFO] X_tensor shape: {X_tensor.shape}")
     print(f"[INFO] y_tensor shape: {y_tensor.shape}")
     print(f"[INFO] vix_tensor shape: {vix_tensor.shape}")
     
-    return X_tensor, y_tensor, vix_tensor, scaler, ASSET_TICKERS
+    return X_tensor, y_tensor, vix_tensor, scaler, ASSET_TICKERS, y_dates
 
 
 if __name__ == "__main__":
