@@ -37,7 +37,8 @@ def train_and_evaluate(model_type, config, X_tensor, y_tensor, vix_tensor, scale
     loss_fn = DecisionAwareLoss(
         eta=config['eta'],
         kappa_base=config['kappa_base'],
-        kappa_vix_scale=config['kappa_vix_scale']
+        kappa_vix_scale=config['kappa_vix_scale'],
+        risk_type='cvar' # [MODIFIED] Optimization(CVaR)와 일관성 유지를 위해 Loss도 CVaR로 변경
     )
     optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'])
     
