@@ -156,16 +156,16 @@ def run_comparison():
         # Summary CSV
         summary_data = [{k: v for k, v in r.items() if k not in ['val_returns', 'val_dates']} for r in results]
         df_summary = pd.DataFrame(summary_data)
-        df_summary.to_csv("loss_comparison_results.csv", index=False)
-        print("\n[Saved] loss_comparison_results.csv")
+        df_summary.to_csv("results/metrics/loss_comparison_results.csv", index=False)
+        print("\n[Saved] results/metrics/loss_comparison_results.csv")
         print(df_summary)
         
         # Returns CSV for Visualization
         df_returns = pd.DataFrame(index=results[0]['val_dates'])
         for res in results:
             df_returns[res['risk_type']] = res['val_returns']
-        df_returns.to_csv("loss_comparison_returns.csv")
-        print("[Saved] loss_comparison_returns.csv")
+        df_returns.to_csv("results/metrics/loss_comparison_returns.csv")
+        print("[Saved] results/metrics/loss_comparison_returns.csv")
         
         # Visualization Code (Embedded)
         import matplotlib.pyplot as plt
@@ -193,8 +193,8 @@ def run_comparison():
         axes[1].grid(True, linestyle='--', alpha=0.5)
         
         plt.tight_layout()
-        plt.savefig("loss_comparison_plot.png")
-        print("[Saved] loss_comparison_plot.png")
+        plt.savefig("results/plots/loss_comparison_plot.png")
+        print("[Saved] results/plots/loss_comparison_plot.png")
 
 if __name__ == "__main__":
     run_comparison()

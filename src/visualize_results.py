@@ -7,8 +7,8 @@ import os
 def visualize_performance():
     # 1. 데이터 로드 (시계열 수익률)
     try:
-        df_returns = pd.read_csv("benchmark_returns.csv", index_col=0, parse_dates=True)
-        print("benchmark_returns.csv 로드 완료")
+        df_returns = pd.read_csv("results/metrics/benchmark_returns.csv", index_col=0, parse_dates=True)
+        print("results/metrics/benchmark_returns.csv 로드 완료")
     except FileNotFoundError:
         print("[Error] benchmark_returns.csv 파일을 찾을 수 없습니다.")
         print("python -m src.benchmark 명령어를 먼저 실행하여 벤치마크 결과를 생성해주세요.")
@@ -53,8 +53,8 @@ def visualize_performance():
     axes[1].set_xlabel("Date")
 
     plt.tight_layout()
-    plt.savefig("benchmark_comparison.png", dpi=300)
-    print("그래프가 benchmark_comparison.png 파일로 저장되었습니다.")
+    plt.savefig("results/plots/benchmark_comparison.png", dpi=300)
+    print("그래프가 results/plots/benchmark_comparison.png 파일로 저장되었습니다.")
     plt.show()
 
 if __name__ == "__main__":

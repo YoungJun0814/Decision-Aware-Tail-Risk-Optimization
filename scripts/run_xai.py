@@ -14,7 +14,12 @@ import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
 import os
+import sys
 import pandas as pd
+
+# Add project root to path for imports when running from scripts/
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from src.data_loader import prepare_training_data, ASSET_TICKERS
 from src.models import get_model
 from src.explainability import GradientSaliency, TFTAnalyzer, CounterfactualAnalyzer
@@ -90,7 +95,7 @@ def run_analysis():
         print(f"    Raw Weights: {vsn_weights}")
         
         # 차트 저장
-        save_path = "xai_tft_variable_importance.png"
+        save_path = "results/plots/xai_tft_variable_importance.png"
         tft_xai.plot_selection_weights(vsn_weights, features[:len(vsn_weights)], save_path=save_path)
         print(f"    [성공] 변수 중요도 차트 저장됨: {save_path}")
         
@@ -110,7 +115,7 @@ def run_analysis():
     sal_map = saliency.compute(X_tensor, target_asset_idx=target_idx)
     
     # 히트맵 저장
-    heatmap_path = "xai_saliency_heatmap.png"
+    heatmap_path = "results/plots/xai_saliency_heatmap.png"
     saliency.plot_heatmap(
         sal_map, 
         features, 
@@ -135,7 +140,7 @@ def run_analysis():
     )
     
     # 민감도 곡선 저장
-    cf_path = "xai_stress_test.png"
+    cf_path = "results/plots/xai_stress_test.png"
     cf.plot_sensitivity_curve(
         crash_results, 
         asset_names=ASSET_TICKERS, 

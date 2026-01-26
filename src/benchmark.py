@@ -184,8 +184,8 @@ def run_5_model_benchmark():
         print(df_res)
         
         # CSV 저장
-        df_res.to_csv("benchmark_results.csv", index=False)
-        print("\n결과가 benchmark_results.csv 파일로 저장되었습니다.")
+        df_res.to_csv("results/metrics/benchmark_results.csv", index=False)
+        print("\n결과가 results/metrics/benchmark_results.csv 파일로 저장되었습니다.")
     else:
         print("결과가 생성되지 않았습니다.")
     
@@ -200,8 +200,8 @@ def run_5_model_benchmark():
         for res in results:
             df_returns[res['model']] = res['val_returns']
             
-        df_returns.to_csv("benchmark_returns.csv")
-        print("시계열 수익률 결과가 benchmark_returns.csv 파일로 저장되었습니다.")
+        df_returns.to_csv("results/metrics/benchmark_returns.csv")
+        print("시계열 수익률 결과가 results/metrics/benchmark_returns.csv 파일로 저장되었습니다.")
 
 if __name__ == "__main__":
     run_5_model_benchmark()

@@ -57,7 +57,15 @@ To solve the "Black Box" problem, we provide a full suite of interpretability to
 ├── data/                   # Data storage
 │   ├── raw/                # Raw downloads (yfinance)
 │   └── processed/          # Preprocessed tensors
-├── src/
+├── notebooks/              # Jupyter Notebooks (Regime Test, etc.)
+├── results/                # Output files
+│   ├── metrics/            # CSV Results (benchmark_results.csv, etc.)
+│   └── plots/              # Charts (benchmark_comparison.png, xai_*.png)
+├── scripts/                # Utility & Analysis Scripts
+│   ├── run_xai.py          # XAI Analysis Runner
+│   ├── verify_assets.py
+│   └── verify_import.py
+├── src/                    # Core Source Modules
 │   ├── data_loader.py      # Data fetching (Prices, VIX) & Preprocessing
 │   ├── loss.py             # DecisionAwareLoss implementation
 │   ├── models.py           # 5 Benchmark Models (LSTM, GRU, TCN, Transformer, TFT)
@@ -67,7 +75,6 @@ To solve the "Black Box" problem, we provide a full suite of interpretability to
 │   ├── benchmark.py        # 5-Model Benchmark Comparison
 │   └── utils.py            # Utility functions (seed, device, MDD)
 ├── main.py                 # Entry point (End-to-End Pipeline)
-├── run_xai.py              # XAI Analysis Runner
 └── README.md               # Documentation
 ```
 
@@ -120,7 +127,7 @@ python -m src.benchmark
 ### Run XAI Analysis
 Analyze model decisions with explainability tools:
 ```bash
-python run_xai.py
+python scripts/run_xai.py
 ```
 
 ---
@@ -143,9 +150,9 @@ You can tune the hyperparameters in the `config` dictionary in `main.py`:
 ## 📊 Benchmark Results
 
 Run `python -m src.benchmark` to generate:
-- `benchmark_results.csv`: Performance metrics (Sharpe, MDD, Annual Return) for each model
-- `benchmark_returns.csv`: Time series of portfolio returns for visualization
-- `benchmark_comparison.png`: Visualization chart
+- `results/metrics/benchmark_results.csv`: Performance metrics (Sharpe, MDD, Annual Return)
+- `results/metrics/benchmark_returns.csv`: Time series of portfolio returns
+- `results/plots/benchmark_comparison.png`: Visualization chart
 
 ---
 
