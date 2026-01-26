@@ -1,6 +1,6 @@
 # Decision-Aware Tail Risk Optimization
 
-> **Status:** Active Development (v2 Implementation Complete)  
+> **Status:** Active Development (v2.2 Implementation Complete)  
 
 
 ## 📖 Project Overview
@@ -9,37 +9,44 @@ This project implements a **Decision-Aware** investment strategy that optimizes 
 
 The core philosophy is **"Asymmetric Payoff"**:
 - **Upside:** Capture market growth with Long assets (SPY, XLV).
-- **Downside:** Defend against crashes with Safe assets (TLT, GLD) and limited Inverse ETF hedging (SH).
+- **Downside:** Defend against crashes with Safe Haven assets (TLT, GLD, BIL).
 
-## 🚀 Key Features (v2)
+## 🚀 Key Features (v2.2)
 
 ### 1. Decision-Aware Learning
 We use a specialized loss function that trains the AI based on the **final portfolio performance** (Return - Risk) rather than prediction accuracy.
 - **Goal:** Maximize Sharpe Ratio / Minimize CVaR directly.
 
 ### 2. Multi-Objective Loss Function (`src/loss.py`)
-Our `DecisionAwareLoss` incorporates four key terms:
+Our `DecisionAwareLoss` incorporates three key terms:
 - **Return Maximization:** $\max \mu^T w$
-- **Risk Minimization:** $\min \sigma_p$ (or CVaR)
+- **Risk Minimization:** Supports `std`, `downside_deviation`, or `cvar` modes.
 - **Dynamic Transaction Costs (κ(VIX)):** Penalizes excessive trading, especially during high volatility (high VIX) to enforce stability.
-- **Inverse Decay Penalty ($\rho$):** Penalizes long-term holding of Inverse ETFs (SH) to prevent value erosion from volatility drag.
 
-### 3. Smart Asset Universe
+### 3. Black-Litterman Integration (`src/models.py`)
+All 5 benchmark models (LSTM, GRU, TCN, Transformer, TFT) output **Black-Litterman parameters** (P, Q, Omega matrices) instead of direct weights:
+- **P:** View matrix (asset relationships)
+- **Q:** Expected return views
+- **Omega:** View uncertainty
+
+The BL formula combines market equilibrium with AI views for robust portfolio allocation.
+
+### 4. Smart Asset Universe
 A robust 5-asset universe covering all weather conditions:
 - **Growth:** `SPY` (S&P 500)
 - **Defensive:** `XLV` (Healthcare - Low Beta)
-- **Safe Haven:** `TLT` (Treasuries), `GLD` (Gold)
-- **Hedge:** `SH` (Inverse S&P 500) - *Restricted to Max 30%*
+- **Safe Haven:** `TLT` (Treasuries), `GLD` (Gold), `BIL` (Short-Term Treasury)
 
-### 4. Safety Constraints (`src/optimization.py`)
-- **Hard Cap on Inverse ETF:** `w[SH] <= 0.3`. The AI cannot bet the farm on a market crash.
-- **No Short Selling:** Long-only portfolio (except for the implicit short via SH).
+### 5. Safety Net Mechanism (`src/optimization.py`)
+- **Crisis Detection:** When VIX > 30, automatically increase allocation to safe assets (BIL).
+- **CVaR Optimization:** Uses cvxpylayers for differentiable convex optimization.
+- **No Short Selling:** Long-only portfolio constraint.
 
-### 5. Explainable AI (XAI) (`src/explainability.py`)
+### 6. Explainable AI (XAI) (`src/explainability.py`)
 To solve the "Black Box" problem, we provide a full suite of interpretability tools:
 - **Gradient Saliency:** Identifies which asset's past returns influenced the decision most.
-- **Attention Analysis:** Visualizes which past time steps (e.g., t-1 vs t-6) the model focused on.
-- **Counterfactual Scenarios:** Simulates "What if VIX doubled?" to ensure the model reacts defensively.
+- **TFT Variable Selection:** Visualizes which input features the model weighted most.
+- **Counterfactual Scenarios:** Simulates "What if SPY crashed?" to ensure the model reacts defensively.
 
 ---
 
@@ -53,13 +60,14 @@ To solve the "Black Box" problem, we provide a full suite of interpretability to
 ├── src/
 │   ├── data_loader.py      # Data fetching (Prices, VIX) & Preprocessing
 │   ├── loss.py             # DecisionAwareLoss implementation
-│   ├── models.py           # LSTM/Transformer Encoders
-│   ├── optimization.py     # Differentiable Optimization Layers (cvxpylayers)
-│   ├── explainability.py   # XAI Module (Saliency, Attention, Counterfactuals)
+│   ├── models.py           # 5 Benchmark Models (LSTM, GRU, TCN, Transformer, TFT)
+│   ├── optimization.py     # Differentiable CVaR Optimization (cvxpylayers)
+│   ├── explainability.py   # XAI Module (Saliency, TFT Analyzer, Counterfactuals)
 │   ├── trainer.py          # Training Loop & Validation
-│   └── benchmark_mvo.py    # Classical Mean-Variance Benchmark
+│   ├── benchmark.py        # 5-Model Benchmark Comparison
+│   └── utils.py            # Utility functions (seed, device, MDD)
 ├── main.py                 # Entry point (End-to-End Pipeline)
-├── verify_env.py           # Dependency verification script
+├── run_xai.py              # XAI Analysis Runner
 └── README.md               # Documentation
 ```
 
@@ -103,10 +111,16 @@ python main.py
 - Training progress (Loss decreasing)
 - Sample portfolio weights showing diversification
 
-### Run Benchmark
-Compare AI performance against a classical Mean-Variance Optimization (Max Sharpe) strategy:
+### Run 5-Model Benchmark
+Compare 5 deep learning models (LSTM, GRU, TCN, Transformer, TFT):
 ```bash
-python -m src.benchmark_mvo
+python -m src.benchmark
+```
+
+### Run XAI Analysis
+Analyze model decisions with explainability tools:
+```bash
+python run_xai.py
 ```
 
 ---
@@ -117,12 +131,21 @@ You can tune the hyperparameters in the `config` dictionary in `main.py`:
 
 | Parameter | Default | Description |
 |---|---|---|
+| `model_type` | 'tft' | Model architecture (lstm, gru, tcn, transformer, tft) |
 | `eta` | 1.0 | Risk aversion parameter (higher = safer) |
 | `kappa_base` | 0.001 | Base transaction cost penalty |
 | `kappa_vix_scale` | 0.0001 | Sensitivity of trading cost to VIX |
-| `rho` | 0.01 | Penalty strength for holding Inverse ETF (SH) |
-| `inverse_cap` | 0.3 | Hard limit on SH allocation (set in `optimization.py`) |
+| `hidden_dim` | 64 | Hidden layer dimension |
+| `epochs` | 50 | Number of training epochs |
 
 ---
 
+## 📊 Benchmark Results
+
+Run `python -m src.benchmark` to generate:
+- `benchmark_results.csv`: Performance metrics (Sharpe, MDD, Annual Return) for each model
+- `benchmark_returns.csv`: Time series of portfolio returns for visualization
+- `benchmark_comparison.png`: Visualization chart
+
+---
 

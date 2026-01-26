@@ -132,7 +132,7 @@ def run_5_model_benchmark():
         'dropout': 0.2,
         'batch_size': 32,
         'learning_rate': 0.001,
-        'epochs': 100, 
+        'epochs': 50, # [MODIFIED] 사용자 요청: 100 -> 50
         'train_ratio': 0.8,
         'eta': 1.0,
         'kappa_base': 0.001,

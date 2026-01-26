@@ -281,16 +281,15 @@ if __name__ == "__main__":
     print(f"Val batches: {len(val_loader)}")
     
     # 모델, 손실함수, 옵티마이저 생성
-    # 테스트를 위한 임시 임포트
+    # 현재 모델 구조에 맞게 수정 (v2.2)
     try:
-        from models import DecisionAwareNet
-        from loss import DecisionAwareLoss
+        from src.models import get_model
+        from src.loss import DecisionAwareLoss
     except ImportError:
         # 경로 문제 발생 시 패스
         print("[Skipping Model Test] Cannot import models/loss directly.")
-        pass
     else:
-        model = DecisionAwareNet(input_dim=input_dim, num_assets=num_assets)
+        model = get_model('lstm', input_dim=input_dim, num_assets=num_assets)
         loss_fn = DecisionAwareLoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
         
@@ -301,3 +300,4 @@ if __name__ == "__main__":
         print("\n--- Training for 5 epochs ---")
         # history = trainer.fit(train_loader, val_loader, epochs=5, verbose=True)
         print("\n[Success] Trainer test passed!")
+

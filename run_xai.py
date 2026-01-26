@@ -21,9 +21,15 @@ from src.explainability import GradientSaliency, TFTAnalyzer, CounterfactualAnal
 from src.utils import get_device, set_seed
 
 def run_analysis():
-    # XAI 그래디언트 계산 시 CuDNN 오류 방지를 위해 CPU 강제 사용 권장
-    # (여기서는 약식으로 5 Epoch 재학습을 하므로 CPU가 빠를 수 있음)
-    device = torch.device('cpu') 
+    # GPU 사용 가능 시 GPU 사용, XAI 분석 시에만 CuDNN 비활성화
+    device = torch.device(get_device())
+    
+    # XAI에서 Input Gradient 계산 시 CuDNN의 RNN backward 호환성 문제 방지
+    # CuDNN을 끄면 RNN 계열 모델에서도 Input Saliency 계산 가능
+    if device.type == 'cuda':
+        torch.backends.cudnn.enabled = False
+        print("[INFO] CuDNN 비활성화됨 (XAI Input Gradient 호환성 확보)")
+    
     set_seed(42)
     
     print("\n" + "="*50)
@@ -36,7 +42,7 @@ def run_analysis():
     end_date = '2024-01-01'
     seq_length = 12
     
-    X_tensor, y_tensor, vix_tensor, scaler, asset_names = prepare_training_data(
+    X_tensor, y_tensor, vix_tensor, scaler, asset_names, _ = prepare_training_data(
         start_date=start_date,
         end_date=end_date,
         seq_length=seq_length

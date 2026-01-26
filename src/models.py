@@ -190,17 +190,19 @@ class GatedResidualNetwork(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.layernorm = nn.LayerNorm(hidden_dim)
         self.gate = nn.Linear(input_dim, hidden_dim * 2) 
+        
+        # Skip connection을 위한 projection (차원이 다를 경우 사용)
+        self.skip_proj = nn.Linear(input_dim, hidden_dim) if input_dim != hidden_dim else nn.Identity()
 
     def forward(self, x):
-        gate_out = torch.sigmoid(self.gate(x)[..., :x.size(-1)]) 
+        gate_out = torch.sigmoid(self.gate(x)[..., :self.fc1.out_features])
         residual = self.fc2(F.elu(self.fc1(x)))
         residual = self.dropout(residual)
         
-        # 차원 불일치 시 처리 (필요한 경우)
-        if x.size(-1) != residual.size(-1):
-             pass
-             
-        out = self.layernorm(x + gate_out * residual)
+        # 차원 불일치 시 projection 적용
+        x_proj = self.skip_proj(x)
+              
+        out = self.layernorm(x_proj + gate_out * residual)
         return out
 
 class VariableSelectionNetwork(nn.Module):

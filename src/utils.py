@@ -70,7 +70,10 @@ def calculate_mdd(returns):
     return mdd
 
 def backtest():
-    pass
+    """TODO: 백테스트 기능 구현 예정"""
+    raise NotImplementedError("Backtest function is not yet implemented")
 
 def plot_results():
-    pass
+    """TODO: 결과 시각화 기능 구현 예정"""
+    raise NotImplementedError("Plot results function is not yet implemented")
+
