@@ -10,8 +10,9 @@ Trainer Module
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, Sampler
 import numpy as np
+import random
 from typing import Optional, Dict, List
 
 
@@ -210,16 +211,75 @@ class Trainer:
         return self.model(X)
 
 
+# =============================================================================
+# Trajectory Batch Sampler (시계열 배치 샘플러)
+# =============================================================================
+
+class TrajectoryBatchSampler(Sampler):
+    """
+    시계열 데이터를 위한 배치 샘플러.
+    
+    연속된 시간 구간(trajectory)을 하나의 배치로 묶어 시간 순서를 보존하면서도,
+    구간 간의 순서는 에폭마다 셔플하여 배치 다양성을 확보합니다.
+    
+    일반 shuffle=True:  [t=45, t=3, t=102, ...]  → 시간 순서 파괴 (Look-ahead Bias)
+    shuffle=False:      [t=1, t=2, ..., t=32]     → 다양성 없음 (과적합 위험)
+    Trajectory Batch:   [t=33~64, t=1~32, ...]     → 구간 내 시간순 + 구간 간 셔플
+    
+    Args:
+        n_samples: 전체 샘플 수
+        batch_size: 배치당 샘플 수
+        shuffle_chunks: 구간 간 순서를 셔플할지 여부 (기본: True)
+        drop_last: 마지막 불완전 배치를 버릴지 여부 (기본: False)
+    """
+    def __init__(self, n_samples: int, batch_size: int, 
+                 shuffle_chunks: bool = True, drop_last: bool = False):
+        self.n_samples = n_samples
+        self.batch_size = batch_size
+        self.shuffle_chunks = shuffle_chunks
+        self.drop_last = drop_last
+    
+    def __iter__(self):
+        # 연속 구간 인덱스 생성: [0:32], [32:64], [64:96], ...
+        indices = list(range(self.n_samples))
+        chunks = [indices[i:i + self.batch_size]
+                  for i in range(0, self.n_samples, self.batch_size)]
+        
+        if not chunks:
+            return
+        
+        # 마지막 불완전 배치 처리
+        if self.drop_last and len(chunks[-1]) < self.batch_size:
+            chunks = chunks[:-1]
+        
+        # 구간 간 순서만 셔플 (구간 내부는 시간순 유지!)
+        if self.shuffle_chunks:
+            random.shuffle(chunks)
+        
+        for chunk in chunks:
+            yield chunk
+    
+    def __len__(self):
+        if self.drop_last:
+            return self.n_samples // self.batch_size
+        return (self.n_samples + self.batch_size - 1) // self.batch_size
+
+
+# =============================================================================
+# 데이터로더 생성 함수
+# =============================================================================
+
 def create_dataloaders(
     X: torch.Tensor,
     y: torch.Tensor,
     vix: torch.Tensor = None,
     batch_size: int = 32,
     train_ratio: float = 0.8,
-    shuffle: bool = True
+    shuffle: bool = False,
+    use_trajectory_batching: bool = True
 ) -> tuple:
     """
-    데이터로더 생성 헬퍼 함수 (v2: VIX 지원)
+    데이터로더 생성 헬퍼 함수 (v3: Trajectory Batching 지원)
     
     Args:
         X: 입력 텐서 (Batch, Seq, Features)
@@ -227,7 +287,10 @@ def create_dataloaders(
         vix: VIX 텐서 (Batch,) - DecisionAwareLoss용
         batch_size: 배치 크기
         train_ratio: 학습 데이터 비율
-        shuffle: 셔플 여부
+        shuffle: 일반 셔플 여부 (기본: False, 시계열이므로)
+        use_trajectory_batching: Trajectory Batching 사용 여부 (기본: True)
+            - True: 구간 내 시간순 보존 + 구간 간 셔플
+            - False: shuffle 파라미터에 따라 동작
     
     Returns:
         train_loader, val_loader
@@ -249,7 +312,19 @@ def create_dataloaders(
         val_dataset = TensorDataset(X_val, y_val)
     
     # DataLoader 생성
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle)
+    if use_trajectory_batching:
+        # Trajectory Batching: 구간 내 시간순 + 구간 간 셔플
+        train_sampler = TrajectoryBatchSampler(
+            n_samples=len(train_dataset),
+            batch_size=batch_size,
+            shuffle_chunks=True   # 구간 간 셔플 활성화
+        )
+        train_loader = DataLoader(train_dataset, batch_sampler=train_sampler)
+    else:
+        # 기존 방식: shuffle 파라미터에 따라 동작
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle)
+    
+    # 검증 데이터는 항상 순차적 (셔플 없음)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     
     return train_loader, val_loader

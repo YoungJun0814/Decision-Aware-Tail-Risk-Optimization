@@ -3,12 +3,13 @@ Data Loader Module
 ==================
 [Step 1] 데이터 수집 및 전처리
 
-- Universe: SPY, XLV, TLT, GLD, BIL (5개 자산)
-  - SPY: S&P 500 (공격 자산)
-  - XLV: Healthcare (방어 섹터)
-  - TLT: 장기 국채 (안전 자산)
-  - GLD: 금 (인플레이션 헷지)
-  - BIL: 초단기 채권 (현금성 안전 자산, 위기 시 대피처)
+- Universe: 10개 자산 (자산 클래스 분산)
+  - 공격: SPY (S&P500), QQQ (나스닥100)
+  - 방어: XLV (헬스케어), XLP (필수소비재)
+  - 순환: XLE (에너지)
+  - 채권: TLT (장기국채), IEF (중기국채)
+  - 대안: GLD (금), VNQ (리츠)
+  - 현금: BIL (초단기채, 위기 시 대피처)
 - Frequency: 일간 데이터를 받아 월말(Month-end) 기준으로 리샘플링
 - Features: 자산 수익률 + 거시변수(Macro, 추후 확장)
 - VIX: 손실 함수(Loss Function)의 동적 거래비용 계산을 위해 별도로 수집
@@ -19,21 +20,24 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 import torch
+from pathlib import Path
 
 
 # =============================================================================
 # 설정 (Configuration)
 # =============================================================================
 
-# 자산 유니버스 (5개)
-# 기존 SH(인버스)는 Volatility Drag 문제로 제거되고 BIL(현금성 자산)로 대체됨.
-ASSET_TICKERS = ['SPY', 'XLV', 'TLT', 'GLD', 'BIL']
+# 자산 유니버스 (10개) — BIL은 반드시 마지막 (CVaR 안전장치 인덱스)
+ASSET_TICKERS = ['SPY', 'QQQ', 'XLV', 'XLP', 'XLE', 'TLT', 'IEF', 'GLD', 'VNQ', 'BIL']
 
 # VIX 티커 (Loss 함수에서 시장 상황 반영을 위해 사용)
 VIX_TICKER = '^VIX'
 
 # 거시경제 지표 (Strategist 선정 시 추가 예정)
 MACRO_TICKERS = []
+
+# Regime 확률 데이터 경로
+REGIME_PROB_PATH = Path(__file__).parent.parent / 'data' / 'processed' / 'prob_data.csv'
 
 
 # =============================================================================
@@ -101,21 +105,54 @@ def get_vix_data(start_date: str, end_date: str) -> pd.Series:
         return pd.Series()
 
 
+def get_regime_proba() -> pd.DataFrame:
+    """
+    Regime 확률 데이터를 로드합니다.
+    
+    Returns:
+        DataFrame with Prob_Bull, Prob_Uncertain, Prob_Crisis columns
+    """
+    if not REGIME_PROB_PATH.exists():
+        print(f"[WARNING] Regime 데이터가 없습니다: {REGIME_PROB_PATH}")
+        print("[INFO] 'python -m src.gen_regime' 명령으로 생성하세요.")
+        return pd.DataFrame()
+    
+    print(f"[INFO] Regime 확률 데이터 로드 중...")
+    regime_df = pd.read_csv(REGIME_PROB_PATH, parse_dates=['Date'], index_col='Date')
+    
+    # 필요한 컬럼만 선택
+    prob_cols = ['Prob_Bull', 'Prob_Uncertain', 'Prob_Crisis']
+    regime_proba = regime_df[prob_cols]
+    
+    print(f"[INFO] Regime 데이터 기간: {regime_proba.index[0].date()} ~ {regime_proba.index[-1].date()}")
+    return regime_proba
+
+
 # =============================================================================
 # 데이터 전처리 함수 (Preprocessing)
 # =============================================================================
 
-def normalize_data(df: pd.DataFrame) -> tuple:
+def normalize_data(df: pd.DataFrame, train_ratio: float = 0.8) -> tuple:
     """
     데이터를 표준화(StandardScaler)합니다.
+    
+    Data Leakage 방지: train 구간만으로 scaler를 fit하고,
+    동일한 scaler로 전체 데이터를 transform합니다.
+    
+    Args:
+        df: 정규화할 데이터프레임
+        train_ratio: 학습 데이터 비율 (기본 0.8)
     """
     scaler = StandardScaler()
-    normalized_values = scaler.fit_transform(df.values)
+    n_train = int(len(df) * train_ratio)
+    scaler.fit(df.values[:n_train])               # Train만으로 fit
+    normalized_values = scaler.transform(df.values) # 전체를 transform
     normalized_df = pd.DataFrame(
         normalized_values, 
         index=df.index, 
         columns=df.columns
     )
+    print(f"[INFO] Scaler fit on train({n_train}rows), transform on all({len(df)}rows) — No data leakage")
     return normalized_df, scaler
 
 
@@ -134,10 +171,11 @@ def create_sequences(data: np.ndarray, seq_length: int) -> tuple:
 
 
 def prepare_training_data(
-    start_date: str = '2005-01-01',
+    start_date: str = '2007-07-01',
     end_date: str = '2024-01-01',
     seq_length: int = 12,
-    normalize: bool = True
+    normalize: bool = True,
+    train_ratio: float = 0.8
 ) -> tuple:
     """
     전체 데이터 파이프라인: 수집 -> 병합 -> 전처리 -> 텐서 변환
@@ -158,11 +196,23 @@ def prepare_training_data(
     # 3. 거시변수 데이터 수집
     macro_returns = get_macro_data(MACRO_TICKERS, start_date, end_date)
     
-    # 4. 데이터 병합
+    # 4. Regime 확률 데이터 수집
+    regime_proba = get_regime_proba()
+    
+    # 5. 데이터 병합
     if not macro_returns.empty:
         combined_data = pd.concat([asset_returns, macro_returns], axis=1).dropna()
     else:
         combined_data = asset_returns.copy()
+    
+    # 6. Regime 확률 병합 (있을 경우)
+    if not regime_proba.empty:
+        combined_data = combined_data.join(regime_proba, how='left')
+        # 결측치 처리: 데이터가 없는 초기 구간은 중립값으로
+        combined_data['Prob_Bull'] = combined_data['Prob_Bull'].fillna(0.33)
+        combined_data['Prob_Uncertain'] = combined_data['Prob_Uncertain'].fillna(0.34)
+        combined_data['Prob_Crisis'] = combined_data['Prob_Crisis'].fillna(0.33)
+        print(f"[INFO] Regime 확률 Feature 추가 완료 (3개 컬럼)")
     
     print(f"\n[INFO] 병합된 데이터 크기: {combined_data.shape}")
     print(f"[INFO] 데이터 기간: {combined_data.index[0]} ~ {combined_data.index[-1]}")
@@ -177,7 +227,7 @@ def prepare_training_data(
     # 6. 정규화 (Standard Scaling)
     scaler = None
     if normalize:
-        combined_data, scaler = normalize_data(combined_data)
+        combined_data, scaler = normalize_data(combined_data, train_ratio=train_ratio)
     
     # 7. 시퀀스 생성 (Windowing)
     data_values = combined_data.values
@@ -214,8 +264,8 @@ if __name__ == "__main__":
     print("Data Loader Test")
     print("=" * 60)
     
-    X, y, vix, scaler, assets = prepare_training_data(
-        start_date='2005-01-01',
+    X, y, vix, scaler, assets, dates = prepare_training_data(
+        start_date='2007-07-01',
         end_date='2024-01-01',
         seq_length=12,
         normalize=True
@@ -225,3 +275,4 @@ if __name__ == "__main__":
     print(f"Assets: {assets}")
     print(f"X shape: {X.shape}")
     print(f"y shape: {y.shape}")
+    print(f"Dates shape: {dates.shape}")

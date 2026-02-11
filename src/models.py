@@ -25,20 +25,50 @@ class BaseBLModel(nn.Module):
     """
     모든 모델의 공통 부모 클래스입니다.
     구조: Encoder -> BL Views(전망) -> BL Formula(수식) -> CVaR Optimization(최적화) -> Weights(비중)
+    
+    Args:
+        input_dim: 입력 피처 차원
+        num_assets: 자산 수
+        hidden_dim: 은닉 차원
+        dropout: 드롭아웃 비율
+        omega_mode: Omega 산출 방식 ('learnable', 'formula', 'hybrid')
+            - 'learnable': 기존 방식 (신경망이 직접 출력, hidden_dim × N 파라미터)
+            - 'formula': 수식 기반 (Ω_ii = τ · p_i² · Σ_ii, 파라미터 0개)
+            - 'hybrid': 수식 + 학습 가능 스케일링 (Ω_ii = α_i · τ · p_i² · Σ_ii, N개 파라미터)
+        sigma_mode: Sigma 반환 방식 ('prior', 'residual')
+            - 'prior': 사전 공분산(sigma) 그대로 반환 (원기님 방식, 그래디언트 단절)
+            - 'residual': sigma + λ * (sigma_bl - sigma.detach()) (잔차 연결, 그래디언트 유지)
     """
-    def __init__(self, input_dim: int, num_assets: int, hidden_dim: int, dropout: float = 0.2):
+    def __init__(self, input_dim: int, num_assets: int, hidden_dim: int, dropout: float = 0.2,
+                 omega_mode: str = 'learnable', sigma_mode: str = 'prior'):
         super(BaseBLModel, self).__init__()
         self.num_assets = num_assets
         self.dropout = dropout
+        self.omega_mode = omega_mode
+        self.sigma_mode = sigma_mode
         
         # --- 전망(View) 생성 헤드 ---
-        # Q: 기대 수익률 전망, P: 자산 간 관계(대각), Omega: 전망의 불확실성
+        # Q: 기대 수익률 전망 (-1 ~ +1, tanh)
         self.head_q = nn.Linear(hidden_dim, num_assets)
-        self.head_p_diag = nn.Linear(hidden_dim, num_assets) 
-        self.head_omega_diag = nn.Linear(hidden_dim, num_assets)
+        # P: 자산 선택 행렬의 대각 원소 (0 ~ 1, sigmoid)
+        self.head_p_diag = nn.Linear(hidden_dim, num_assets)
+        
+        # Omega 헤드: omega_mode에 따라 다르게 초기화
+        if omega_mode == 'learnable':
+            # 기존 방식: 신경망이 직접 Omega 출력
+            self.head_omega_diag = nn.Linear(hidden_dim, num_assets)
+        elif omega_mode == 'hybrid':
+            # 하이브리드: 수식 기반 + 학습 가능 스케일링
+            # α_i = exp(log_alpha_i), 초기값 0 → α = 1.0 (표준 BL과 동일)
+            self.log_alpha = nn.Parameter(torch.zeros(num_assets))
+        # formula 모드: 추가 파라미터 없음
 
         self.tanh = nn.Tanh()
         self.softplus = nn.Softplus()
+        
+        # Residual sigma 모드의 블렌딩 강도
+        if sigma_mode == 'residual':
+            self.lambda_blend = nn.Parameter(torch.tensor(0.1))
         
         # --- 최적화 레이어 ---
         # 안전망이 포함된 CVaR 최적화 (BIL=4)
@@ -46,23 +76,97 @@ class BaseBLModel(nn.Module):
             num_assets=num_assets,
             num_scenarios=200,
             confidence_level=0.95,
-            bil_index=4,      # BIL 인덱스
+            bil_index=9,      # BIL 인덱스 (10자산 유니버스에서 마지막)
             safety_threshold=0.5
         )
 
-    def get_bl_parameters(self, hidden_features: torch.Tensor):
-        batch_size = hidden_features.size(0)
+    def get_bl_parameters(self, hidden_features: torch.Tensor, sigma: torch.Tensor = None):
+        """
+        BL 파라미터(P, Q, Omega) 생성.
+        
+        Args:
+            hidden_features: (B, hidden_dim) 인코더 출력
+            sigma: (B, N, N) 공분산 행렬 (formula/hybrid 모드에서 필요)
+        
+        Returns:
+            p: (B, N, N) Pick 행렬
+            q: (B, N, 1) 전망 벡터
+            omega: (B, N, N) 불확실성 행렬
+        """
+        # Q: 기대 수익률 전망
         q = self.tanh(self.head_q(hidden_features)).unsqueeze(-1)
+        
+        # P: 대각 행렬
         p_diag = torch.sigmoid(self.head_p_diag(hidden_features))
-        p = torch.diag_embed(p_diag) 
-        omega_diag = self.softplus(self.head_omega_diag(hidden_features)) + 1e-6
-        omega = torch.diag_embed(omega_diag)
+        p = torch.diag_embed(p_diag)
+        
+        # Omega: 모드에 따라 다르게 계산
+        if self.omega_mode == 'learnable':
+            # 기존 방식: 신경망 직접 출력
+            omega_diag = self.softplus(self.head_omega_diag(hidden_features)) + 1e-6
+            omega = torch.diag_embed(omega_diag)
+            
+        elif self.omega_mode == 'formula':
+            # 수식 기반: Ω_ii = τ · p_i² · Σ_ii
+            omega = self._compute_omega_formula(p_diag, sigma, tau=0.05)
+            
+        elif self.omega_mode == 'hybrid':
+            # 하이브리드: Ω_ii = α_i · τ · p_i² · Σ_ii
+            omega = self._compute_omega_hybrid(p_diag, sigma, tau=0.05)
+        else:
+            raise ValueError(f"Unknown omega_mode: {self.omega_mode}")
+        
         return p, q, omega
+    
+    def _compute_omega_formula(self, p_diag: torch.Tensor, sigma: torch.Tensor, tau: float = 0.05) -> torch.Tensor:
+        """
+        수식 기반 Omega: Ω_ii = τ · p_i² · Σ_ii
+        
+        P가 대각 행렬일 때 diag(P(τΣ)P^T)를 직접 계산한 결과.
+        파라미터 0개 — 시장 공분산에서 직접 유도.
+        
+        Args:
+            p_diag: (B, N) P 행렬의 대각 원소
+            sigma: (B, N, N) 공분산 행렬
+            tau: 스케일링 인자 (기본 0.05)
+        
+        Returns:
+            omega: (B, N, N) 대각 불확실성 행렬
+        """
+        sigma_diag = torch.diagonal(sigma, dim1=1, dim2=2)  # (B, N)
+        omega_diag = tau * (p_diag ** 2) * sigma_diag + 1e-6
+        return torch.diag_embed(omega_diag)
+    
+    def _compute_omega_hybrid(self, p_diag: torch.Tensor, sigma: torch.Tensor, tau: float = 0.05) -> torch.Tensor:
+        """
+        하이브리드 Omega: Ω_ii = α_i · τ · p_i² · Σ_ii
+        
+        수식 기반 + 자산별 학습 가능 스케일링(α).
+        - α_i = exp(log_alpha_i): 항상 양수, 초기값 1.0 (표준 BL과 동일)
+        - α_i > 1: 해당 자산 뷰에 덜 확신 → BL이 사전확률 쪽으로 기움
+        - α_i < 1: 해당 자산 뷰에 더 확신 → BL이 모델 전망 쪽으로 기움
+        
+        Args:
+            p_diag: (B, N) P 행렬의 대각 원소
+            sigma: (B, N, N) 공분산 행렬
+            tau: 스케일링 인자 (기본 0.05)
+        
+        Returns:
+            omega: (B, N, N) 대각 불확실성 행렬
+        """
+        alpha = torch.exp(self.log_alpha)  # (N,) 항상 양수
+        sigma_diag = torch.diagonal(sigma, dim1=1, dim2=2)  # (B, N)
+        omega_diag = alpha * tau * (p_diag ** 2) * sigma_diag + 1e-6
+        return torch.diag_embed(omega_diag)
 
     def black_litterman_formula(self, p, q, omega, pi, sigma, tau=0.05):
         """
         Black-Litterman 공식의 완전한 구현입니다.
         연구 논문의 수식: E[R] = [(tau*Sigma)^-1 + P.T * Omega^-1 * P]^-1 * ...
+        
+        Returns:
+            mu_bl: (B, N) 사후 기대수익률
+            sigma_out: (B, N, N) 최적화에 사용할 공분산 (sigma_mode에 따라 다름)
         """
         tau_sigma = tau * sigma
         
@@ -89,7 +193,17 @@ class BaseBLModel(nn.Module):
         
         mu_bl = torch.bmm(sigma_bl, term_c + term_d)
         
-        return mu_bl.squeeze(-1), sigma_bl
+        # Sigma 반환: sigma_mode에 따라 다르게 처리
+        if self.sigma_mode == 'prior':
+            # 원기님 방식: 사전 공분산 그대로 사용 (그래디언트 단절, 과적합 방지)
+            sigma_out = sigma
+        elif self.sigma_mode == 'residual':
+            # 잔차 연결: 기본은 sigma이지만, sigma_bl 경로로 그래디언트 역전파
+            sigma_out = sigma + self.lambda_blend * (sigma_bl - sigma.detach())
+        else:
+            sigma_out = sigma
+        
+        return mu_bl.squeeze(-1), sigma_out
 
     def forward(self, x: torch.Tensor, pi: torch.Tensor = None, sigma: torch.Tensor = None, is_crisis: float = 0.0) -> torch.Tensor:
         """
@@ -101,30 +215,27 @@ class BaseBLModel(nn.Module):
         bs, seq_len, _ = x.size()
         device = x.device
         
-        # 0. 입력값이 없으면 과거 데이터로부터 사전확률(Prior) 추정
+        # 0. sigma/pi 추정 (미리 계산 — formula/hybrid 모드에서 BL 파라미터 생성 시 필요)
         if sigma is None:
-            # 입력 데이터 X로부터 공분산 추정
-            sigma = estimate_covariance(x, shrinkage=0.1)
+            asset_returns = x[:, :, :self.num_assets]
+            sigma = estimate_covariance(asset_returns, shrinkage=0.1)
             
         if pi is None:
-            # 단순 평균 수익률을 사전 기대수익률로 사용
-            pi = x.mean(dim=1)
-
-        # 0.1 위기 상황 자동 감지 (현재는 명시적 flag 사용)
-        if is_crisis == 0.0:
-            pass
+            if 'asset_returns' not in locals():
+                asset_returns = x[:, :, :self.num_assets]
+            pi = asset_returns.mean(dim=1)
 
         # 1. 인코딩 (딥러닝 모델이 시장 상황 압축)
         hidden = self.encode(x) 
         
-        # 2. 뷰(View) 생성 (AI가 독자적인 시장 전망 수립)
-        p, q, omega = self.get_bl_parameters(hidden)
+        # 2. 뷰(View) 생성 (sigma를 전달하여 formula/hybrid omega 계산에 활용)
+        p, q, omega = self.get_bl_parameters(hidden, sigma=sigma)
         
         # 3. Black-Litterman 공식 적용 (시장 데이터 + AI 전망 결합)
-        mu_bl, sigma_bl = self.black_litterman_formula(p, q, omega, pi, sigma)
+        mu_bl, sigma_out = self.black_litterman_formula(p, q, omega, pi, sigma)
         
         # 4. CVaR 최적화 수행 (위험을 최소화하는 비중 계산)
-        weights = self.opt_layer(mu_bl, sigma_bl, is_crisis=is_crisis)
+        weights = self.opt_layer(mu_bl, sigma_out, is_crisis=is_crisis)
         
         return weights
         
@@ -137,8 +248,9 @@ class BaseBLModel(nn.Module):
 # =============================================================================
 
 class LSTMModel(BaseBLModel):
-    def __init__(self, input_dim, num_assets, hidden_dim=64, num_layers=2, dropout=0.2):
-        super().__init__(input_dim, num_assets, hidden_dim, dropout)
+    def __init__(self, input_dim, num_assets, hidden_dim=64, num_layers=2, dropout=0.2,
+                 omega_mode='learnable', sigma_mode='prior'):
+        super().__init__(input_dim, num_assets, hidden_dim, dropout, omega_mode, sigma_mode)
         self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True, dropout=dropout if num_layers > 1 else 0)
     
     def encode(self, x):
@@ -146,8 +258,9 @@ class LSTMModel(BaseBLModel):
         return h_n[-1]
 
 class GRUModel(BaseBLModel):
-    def __init__(self, input_dim, num_assets, hidden_dim=64, num_layers=2, dropout=0.2):
-        super().__init__(input_dim, num_assets, hidden_dim, dropout)
+    def __init__(self, input_dim, num_assets, hidden_dim=64, num_layers=2, dropout=0.2,
+                 omega_mode='learnable', sigma_mode='prior'):
+        super().__init__(input_dim, num_assets, hidden_dim, dropout, omega_mode, sigma_mode)
         self.gru = nn.GRU(input_dim, hidden_dim, num_layers, batch_first=True, dropout=dropout if num_layers > 1 else 0)
     
     def encode(self, x):
@@ -155,8 +268,9 @@ class GRUModel(BaseBLModel):
         return h_n[-1]
 
 class TCNModel(BaseBLModel):
-    def __init__(self, input_dim, num_assets, hidden_dim=64, start_kernel_size=3, dropout=0.2):
-        super().__init__(input_dim, num_assets, hidden_dim, dropout)
+    def __init__(self, input_dim, num_assets, hidden_dim=64, start_kernel_size=3, dropout=0.2,
+                 omega_mode='learnable', sigma_mode='prior'):
+        super().__init__(input_dim, num_assets, hidden_dim, dropout, omega_mode, sigma_mode)
         self.tcn = nn.Sequential(
             nn.Conv1d(input_dim, hidden_dim, kernel_size=start_kernel_size, padding=start_kernel_size//2),
             nn.ReLU(),
@@ -170,8 +284,9 @@ class TCNModel(BaseBLModel):
         return out.squeeze(-1)
 
 class TransformerModel(BaseBLModel):
-    def __init__(self, input_dim, num_assets, hidden_dim=64, num_layers=2, nhead=4, dropout=0.2):
-        super().__init__(input_dim, num_assets, hidden_dim, dropout)
+    def __init__(self, input_dim, num_assets, hidden_dim=64, num_layers=2, nhead=4, dropout=0.2,
+                 omega_mode='learnable', sigma_mode='prior'):
+        super().__init__(input_dim, num_assets, hidden_dim, dropout, omega_mode, sigma_mode)
         self.input_proj = nn.Linear(input_dim, hidden_dim)
         encoder_layer = nn.TransformerEncoderLayer(d_model=hidden_dim, nhead=nhead, dim_feedforward=hidden_dim*4, dropout=dropout, batch_first=True)
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
@@ -232,8 +347,9 @@ class VariableSelectionNetwork(nn.Module):
         return combined
 
 class TFTModel(BaseBLModel):
-    def __init__(self, input_dim, num_assets, hidden_dim=64, num_layers=2, nhead=4, dropout=0.2):
-        super().__init__(input_dim, num_assets, hidden_dim, dropout)
+    def __init__(self, input_dim, num_assets, hidden_dim=64, num_layers=2, nhead=4, dropout=0.2,
+                 omega_mode='learnable', sigma_mode='prior'):
+        super().__init__(input_dim, num_assets, hidden_dim, dropout, omega_mode, sigma_mode)
         
         self.vsn = VariableSelectionNetwork(1, input_dim, hidden_dim, dropout)
         self.lstm_encoder = nn.LSTM(hidden_dim, hidden_dim, num_layers, batch_first=True)
@@ -253,32 +369,92 @@ class TFTModel(BaseBLModel):
         attn_out = self.layernorm_attn(self.gate_attn(attn_out) + lstm_out)
         return attn_out[:, -1, :] 
 
-def get_model(model_type, input_dim, num_assets, device='cpu'):
+
+# =============================================================================
+# 3. 모델 팩토리 함수
+# =============================================================================
+
+def get_model(model_type, input_dim, num_assets, device='cpu',
+              omega_mode='learnable', sigma_mode='prior'):
+    """
+    모델 팩토리 함수.
+    
+    Args:
+        model_type: 모델 아키텍처 ('lstm', 'gru', 'tcn', 'transformer', 'tft')
+        input_dim: 입력 피처 차원
+        num_assets: 자산 수
+        device: 학습 디바이스
+        omega_mode: Omega 산출 방식 ('learnable', 'formula', 'hybrid')
+        sigma_mode: Sigma 반환 방식 ('prior', 'residual')
+    
+    Returns:
+        model: 초기화된 BaseBLModel 인스턴스
+    """
     model_map = {
         'lstm': LSTMModel, 'gru': GRUModel, 'tcn': TCNModel,
         'transformer': TransformerModel, 'tft': TFTModel
     }
-    return model_map[model_type](input_dim, num_assets, hidden_dim=64).to(device)
+    if model_type not in model_map:
+        raise ValueError(f"Unknown model_type: {model_type}. Choose from {list(model_map.keys())}")
+    
+    return model_map[model_type](
+        input_dim, num_assets, hidden_dim=64,
+        omega_mode=omega_mode, sigma_mode=sigma_mode
+    ).to(device)
+
+
+# =============================================================================
+# Self-Test
+# =============================================================================
 
 if __name__ == "__main__":
-    print("-" * 50)
-    print("5-Model Benchmark Test")
-    print("-" * 50)
+    print("=" * 60)
+    print("Models Self-Test: 5 Models × 3 Omega × 2 Sigma")
+    print("=" * 60)
+    
     B, S, F_in = 4, 12, 10
-    num_assets = 5
+    num_assets = 10
     x = torch.randn(B, S, F_in)
     
-    models = ['lstm', 'gru', 'tcn', 'transformer', 'tft']
+    omega_modes = ['learnable', 'formula', 'hybrid']
+    sigma_modes = ['prior', 'residual']
     
-    for m_name in models:
-        print(f"\nTesting {m_name.upper()}...")
+    # 빠른 테스트: TFT만 전체 모드 테스트, 나머지는 기본 모드
+    test_configs = []
+    
+    # TFT: 모든 모드 조합 테스트
+    for om in omega_modes:
+        for sm in sigma_modes:
+            test_configs.append(('tft', om, sm))
+    
+    # 나머지 모델: 기본 모드만 테스트
+    for m_name in ['lstm', 'gru', 'tcn', 'transformer']:
+        test_configs.append((m_name, 'learnable', 'prior'))
+    
+    passed = 0
+    failed = 0
+    
+    for m_name, om, sm in test_configs:
+        label = f"{m_name.upper()} (omega={om}, sigma={sm})"
         try:
-            model = get_model(m_name, F_in, num_assets)
-            # 더미 순전파 (Forward pass)
+            model = get_model(m_name, F_in, num_assets, omega_mode=om, sigma_mode=sm)
             w = model(x)
-            print(f"  Output Shape: {w.shape}")
-            print(f"  Sum check: {w[0].sum().item():.4f}")
+            
+            # 검증: 출력 형태 + 합계 ≈ 1.0
+            assert w.shape == (B, num_assets), f"Shape mismatch: {w.shape}"
+            weight_sum = w[0].sum().item()
+            assert 0.95 <= weight_sum <= 1.05, f"Weight sum out of range: {weight_sum}"
+            
+            # 파라미터 수 계산
+            n_params = sum(p.numel() for p in model.parameters())
+            print(f"  [OK] {label:50s} | params: {n_params:>6,} | w_sum: {weight_sum:.4f}")
+            passed += 1
         except Exception as e:
-            print(f"  FAILED: {e}")
+            print(f"  [FAIL] {label:50s} | ERROR: {e}")
             import traceback
             traceback.print_exc()
+            failed += 1
+    
+    print(f"\n{'=' * 60}")
+    print(f"Results: {passed} passed, {failed} failed out of {passed + failed}")
+    print(f"{'=' * 60}")

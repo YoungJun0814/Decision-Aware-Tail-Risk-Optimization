@@ -26,8 +26,7 @@ warnings.filterwarnings('ignore')
 from src.data_loader import (
     prepare_training_data, 
     get_monthly_asset_data,
-    ASSET_TICKERS,
-    INVERSE_ETF_INDEX
+    ASSET_TICKERS
 )
 from src.models import get_model  # v2.1: 모델 팩토리
 from src.loss import DecisionAwareLoss  # v2: DecisionAwareLoss 사용
@@ -48,7 +47,7 @@ def main():
     # =========================================================================
     config = {
         # 데이터 설정
-        'start_date': '2005-01-01',
+        'start_date': '2007-07-01',
         'end_date': '2024-01-01',
         'seq_length': 12,  # 12개월 lookback
         
@@ -71,7 +70,11 @@ def main():
         
         # 기타
         'device': 'cuda' if torch.cuda.is_available() else 'cpu',
-        'seed': 42
+        'seed': 42,
+        
+        # 모델 모드 설정
+        'omega_mode': 'learnable',   # 'learnable', 'formula', 'hybrid'
+        'sigma_mode': 'prior',       # 'prior', 'residual'
     }
     
     print(f"\n[Config]")
@@ -127,7 +130,9 @@ def main():
         model_type=config['model_type'],
         input_dim=input_dim,
         num_assets=num_assets,
-        device=config['device']
+        device=config['device'],
+        omega_mode=config['omega_mode'],
+        sigma_mode=config['sigma_mode']
     )
     
     print(f"\nModel Architecture: {config['model_type'].upper()}")

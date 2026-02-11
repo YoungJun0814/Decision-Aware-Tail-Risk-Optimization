@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.data_loader import prepare_training_data, ASSET_TICKERS
 from src.models import get_model
+from src.loss import DecisionAwareLoss
 from src.explainability import GradientSaliency, TFTAnalyzer, CounterfactualAnalyzer
 from src.utils import get_device, set_seed
 
@@ -67,11 +68,14 @@ def run_analysis():
     print("    (의미 있는 설명을 위해 5 Epoch 약식 재학습 수행)...")
     model.train()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.005)
-    loss_fn = nn.MSELoss() # 속도를 위해 MSE 사용 (약식)
+    loss_fn = DecisionAwareLoss(eta=1.0, kappa_base=0.001, kappa_vix_scale=0.0001)
+    
+    # VIX 텐서도 디바이스로 이동
+    vix_tensor = vix_tensor.to(device)
     
     for _ in range(5):
         w = model(X_tensor)
-        loss = loss_fn(w, y_tensor.to(device))
+        loss = loss_fn(w, y_tensor.to(device), vix_tensor)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -88,7 +92,8 @@ def run_analysis():
         
         # 특성 이름 매핑 (현재는 자산 수익률이 곧 Feature라고 가정)
         # 실제로는 [SPY, XLV, TLT, GLD, BIL] + [Macro...] 순서
-        features = ASSET_TICKERS
+        # 실제로는 [SPY, XLV, TLT, GLD, BIL] + [Bull, Uncertain, Crisis]
+        features = ASSET_TICKERS + ['Prob_Bull', 'Prob_Uncertain', 'Prob_Crisis']
         if len(features) < len(vsn_weights):
             features += [f"Feat_{i}" for i in range(len(features), len(vsn_weights))]
         

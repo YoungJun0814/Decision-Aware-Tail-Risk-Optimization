@@ -22,16 +22,18 @@ from src.models import get_model
 from src.loss import DecisionAwareLoss
 from src.utils import set_seed, get_device
 
-def train_and_evaluate(model_type, config, X_tensor, y_tensor, vix_tensor, scaler=None):
+def train_and_evaluate(model_type, config, X_tensor, y_tensor, vix_tensor, scaler=None,
+                       omega_mode='learnable', sigma_mode='prior'):
     """단일 모델 학습 및 평가"""
     device = config['device']
     input_dim = X_tensor.shape[-1]
     num_assets = y_tensor.shape[-1]
     
-    print(f"\n[{model_type.upper()}] 모델 학습 시작...")
+    print(f"\n[{model_type.upper()}] 모델 학습 시작... (omega={omega_mode}, sigma={sigma_mode})")
     
     # 1. 모델 생성
-    model = get_model(model_type, input_dim, num_assets, device=device)
+    model = get_model(model_type, input_dim, num_assets, device=device,
+                      omega_mode=omega_mode, sigma_mode=sigma_mode)
     
     # 2. 손실 함수 (DecisionAwareLoss) 및 옵티마이저
     loss_fn = DecisionAwareLoss(
@@ -123,38 +125,9 @@ def train_and_evaluate(model_type, config, X_tensor, y_tensor, vix_tensor, scale
     }
 
 def run_5_model_benchmark():
-    # 설정 (Config)
-    config = {
-        'start_date': '2005-01-01',
-        'end_date': '2024-01-01',
-        'seq_length': 12,
-        'hidden_dim': 64,
-        'num_layers': 2,
-        'dropout': 0.2,
-        'batch_size': 32,
-        'learning_rate': 0.001,
-        'epochs': 50, # [MODIFIED] 사용자 요청: 100 -> 50
-        'train_ratio': 0.8,
-        'eta': 1.0,
-        'kappa_base': 0.001,
-        'kappa_vix_scale': 0.0001,
-        'device': get_device(),
-        'seed': 42
-    }
-    
-    set_seed(config['seed'])
-    
-    # 데이터 로드
-    print("데이터 로딩 중...")
-    X_tensor, y_tensor, vix_tensor, scaler, asset_names, y_dates = prepare_training_data(
-        start_date=config['start_date'],
-        end_date=config['end_date'],
-        seq_length=config['seq_length']
-    )
-    
-    X_tensor = X_tensor.to(config['device']).float()
-    y_tensor = y_tensor.to(config['device']).float()
-    vix_tensor = vix_tensor.to(config['device']).float()
+    # 공통 설정 사용 (중복 제거)
+    config = _get_benchmark_config()
+    X_tensor, y_tensor, vix_tensor, scaler, asset_names, y_dates = _load_benchmark_data(config)
     
     # 비교할 모델 리스트
     models = ['lstm', 'gru', 'tcn', 'transformer', 'tft']
@@ -166,7 +139,8 @@ def run_5_model_benchmark():
     
     for m in models:
         try:
-            res = train_and_evaluate(m, config, X_tensor, y_tensor, vix_tensor, scaler) # scaler 전달
+            set_seed(config['seed'])  # 모델별 동일 시드 보장
+            res = train_and_evaluate(m, config, X_tensor, y_tensor, vix_tensor, scaler)
             results.append(res)
         except Exception as e:
             print(f"[{m.upper()}] 학습 실패: {e}")
@@ -179,23 +153,20 @@ def run_5_model_benchmark():
     print("="*50)
     df_res = pd.DataFrame(results)
     if not df_res.empty:
-        # Loss가 낮은 순서대로 정렬 (낮을수록 좋음)
         df_res = df_res.sort_values('val_loss') 
         print(df_res)
         
-        # CSV 저장
+        os.makedirs("results/metrics", exist_ok=True)
         df_res.to_csv("results/metrics/benchmark_results.csv", index=False)
         print("\n결과가 results/metrics/benchmark_results.csv 파일로 저장되었습니다.")
     else:
         print("결과가 생성되지 않았습니다.")
     
-    # [NEW] 시계열 수익률 저장 (Visualization용)
+    # 시계열 수익률 저장 (Visualization용)
     if results:
-        # Validation Dates 구하기
         train_size = int(len(X_tensor) * config['train_ratio'])
         val_dates = y_dates[train_size:]
         
-        # DataFrame 생성
         df_returns = pd.DataFrame(index=val_dates)
         for res in results:
             df_returns[res['model']] = res['val_returns']
@@ -203,5 +174,147 @@ def run_5_model_benchmark():
         df_returns.to_csv("results/metrics/benchmark_returns.csv")
         print("시계열 수익률 결과가 results/metrics/benchmark_returns.csv 파일로 저장되었습니다.")
 
+
+def _get_benchmark_config():
+    """벤치마크 공통 설정"""
+    return {
+        'start_date': '2007-07-01',
+        'end_date': '2024-01-01',
+        'seq_length': 12,
+        'hidden_dim': 64,
+        'num_layers': 2,
+        'dropout': 0.2,
+        'batch_size': 32,
+        'learning_rate': 0.001,
+        'epochs': 50,
+        'train_ratio': 0.8,
+        'eta': 1.0,
+        'kappa_base': 0.001,
+        'kappa_vix_scale': 0.0001,
+        'device': get_device(),
+        'seed': 42
+    }
+
+
+def _load_benchmark_data(config):
+    """벤치마크 공통 데이터 로딩"""
+    set_seed(config['seed'])
+    
+    print("데이터 로딩 중...")
+    X_tensor, y_tensor, vix_tensor, scaler, asset_names, y_dates = prepare_training_data(
+        start_date=config['start_date'],
+        end_date=config['end_date'],
+        seq_length=config['seq_length']
+    )
+    
+    X_tensor = X_tensor.to(config['device']).float()
+    y_tensor = y_tensor.to(config['device']).float()
+    vix_tensor = vix_tensor.to(config['device']).float()
+    
+    return X_tensor, y_tensor, vix_tensor, scaler, asset_names, y_dates
+
+
+def run_omega_benchmark():
+    """
+    Omega 3-Way Benchmark: GRU 모델 고정, 3가지 omega_mode 비교
+    
+    - learnable: 기존 방식 (신경망이 직접 Omega 출력)
+    - formula: 수식 기반 (Ω_ii = τ · p_i² · Σ_ii)
+    - hybrid: 수식 + 학습 가능 스케일링 (α_i · τ · p_i² · Σ_ii)
+    """
+    config = _get_benchmark_config()
+    X_tensor, y_tensor, vix_tensor, scaler, asset_names, y_dates = _load_benchmark_data(config)
+    
+    omega_modes = ['learnable', 'formula', 'hybrid']
+    results = []
+    
+    print("\n" + "=" * 60)
+    print("Omega 3-Way Benchmark (GRU Model)")
+    print("=" * 60)
+    
+    for om in omega_modes:
+        try:
+            set_seed(config['seed'])  # 모드별 동일 시드 보장
+            res = train_and_evaluate(
+                'gru', config, X_tensor, y_tensor, vix_tensor, scaler,
+                omega_mode=om, sigma_mode='prior'
+            )
+            res['omega_mode'] = om
+            results.append(res)
+        except Exception as e:
+            print(f"[omega={om}] 학습 실패: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    # 결과 요약
+    print("\n" + "=" * 60)
+    print("Omega Benchmark 결과")
+    print("=" * 60)
+    if results:
+        df_res = pd.DataFrame(results)
+        print(df_res[['omega_mode', 'val_loss', 'sharpe', 'annual_return', 'mdd']].to_string(index=False))
+        os.makedirs("results/metrics", exist_ok=True)
+        df_res.to_csv("results/metrics/omega_benchmark_results.csv", index=False)
+        print("\n결과가 results/metrics/omega_benchmark_results.csv 파일로 저장되었습니다.")
+
+
+def run_sigma_benchmark():
+    """
+    Sigma 2-Way Benchmark: GRU 모델 고정, 2가지 sigma_mode 비교
+    
+    - prior: 사전 공분산 그대로 반환 (원기님 방식)
+    - residual: sigma + λ * (sigma_bl - sigma.detach()) (잔차 연결)
+    """
+    config = _get_benchmark_config()
+    X_tensor, y_tensor, vix_tensor, scaler, asset_names, y_dates = _load_benchmark_data(config)
+    
+    sigma_modes = ['prior', 'residual']
+    results = []
+    
+    print("\n" + "=" * 60)
+    print("Sigma 2-Way Benchmark (GRU Model)")
+    print("=" * 60)
+    
+    for sm in sigma_modes:
+        try:
+            set_seed(config['seed'])  # 모드별 동일 시드 보장
+            res = train_and_evaluate(
+                'gru', config, X_tensor, y_tensor, vix_tensor, scaler,
+                omega_mode='learnable', sigma_mode=sm
+            )
+            res['sigma_mode'] = sm
+            results.append(res)
+        except Exception as e:
+            print(f"[sigma={sm}] 학습 실패: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    # 결과 요약
+    print("\n" + "=" * 60)
+    print("Sigma Benchmark 결과")
+    print("=" * 60)
+    if results:
+        df_res = pd.DataFrame(results)
+        print(df_res[['sigma_mode', 'val_loss', 'sharpe', 'annual_return', 'mdd']].to_string(index=False))
+        os.makedirs("results/metrics", exist_ok=True)
+        df_res.to_csv("results/metrics/sigma_benchmark_results.csv", index=False)
+        print("\n결과가 results/metrics/sigma_benchmark_results.csv 파일로 저장되었습니다.")
+
+
 if __name__ == "__main__":
-    run_5_model_benchmark()
+    import sys
+    
+    if len(sys.argv) > 1:
+        benchmark_type = sys.argv[1]
+        if benchmark_type == 'omega':
+            run_omega_benchmark()
+        elif benchmark_type == 'sigma':
+            run_sigma_benchmark()
+        elif benchmark_type == 'models':
+            run_5_model_benchmark()
+        else:
+            print(f"Unknown benchmark type: {benchmark_type}")
+            print("Usage: python -m src.benchmark [models|omega|sigma]")
+    else:
+        # 기본: 5모델 벤치마크
+        run_5_model_benchmark()
