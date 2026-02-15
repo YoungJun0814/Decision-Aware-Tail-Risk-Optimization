@@ -1,17 +1,16 @@
 # Decision-Aware Tail Risk Optimization
 
-> **Status:** Active Development (v2.2 Implementation Complete)  
-
+> **Status:** Active Development (10-Asset Expansion & Regime Model Analysis Complete)
 
 ## 📖 Project Overview
 
 This project implements a **Decision-Aware** investment strategy that optimizes for tail risk protection and superior risk-adjusted returns. Unlike traditional methods that forecast future prices (MSE loss) and then optimize, our model learns to **optimize portfolio weights directly** by backpropagating gradients through the optimization problem.
 
 The core philosophy is **"Asymmetric Payoff"**:
-- **Upside:** Capture market growth with Long assets (SPY, XLV).
+- **Upside:** Capture market growth with Long assets (SPY, QQQ, Sectors).
 - **Downside:** Defend against crashes with Safe Haven assets (TLT, GLD, BIL).
 
-## 🚀 Key Features (v2.2)
+## 🚀 Key Features (v2.3)
 
 ### 1. Decision-Aware Learning
 We use a specialized loss function that trains the AI based on the **final portfolio performance** (Return - Risk) rather than prediction accuracy.
@@ -27,15 +26,15 @@ Our `DecisionAwareLoss` incorporates three key terms:
 All 5 benchmark models (LSTM, GRU, TCN, Transformer, TFT) output **Black-Litterman parameters** (P, Q, Omega matrices) instead of direct weights:
 - **P:** View matrix (asset relationships)
 - **Q:** Expected return views
-- **Omega:** View uncertainty
+- **Omega:** View uncertainty (We recommend `Learnable` mode)
 
 The BL formula combines market equilibrium with AI views for robust portfolio allocation.
 
-### 4. Smart Asset Universe
-A robust 5-asset universe covering all weather conditions:
-- **Growth:** `SPY` (S&P 500)
-- **Defensive:** `XLV` (Healthcare - Low Beta)
-- **Safe Haven:** `TLT` (Treasuries), `GLD` (Gold), `BIL` (Short-Term Treasury)
+### 4. Robust 10-Asset Universe
+Expanded from 5 to 10 assets to capture diverse market conditions:
+- **Equity:** `SPY` (S&P 500), `QQQ` (Nasdaq 100), `XLV` (Healthcare), `XLP` (Staples), `XLE` (Energy)
+- **Bonds:** `TLT` (Long-Term), `IEF` (Mid-Term), `BIL` (T-Bills/Cash)
+- **Alternatives:** `GLD` (Gold), `VNQ` (Real Estate)
 
 ### 5. Safety Net Mechanism (`src/optimization.py`)
 - **Crisis Detection:** When VIX > 30, automatically increase allocation to safe assets (BIL).
@@ -50,6 +49,17 @@ To solve the "Black Box" problem, we provide a full suite of interpretability to
 
 ---
 
+## 📚 Analysis & Reports (New!)
+
+Detailed analysis regarding the project's recent milestones can be found in the `docs/` directory:
+
+- [**Benchmark Analysis (10-Asset)**](docs/benchmark_analysis.md): Comparison of 5 models and Omega/Sigma settings.
+    - **Key Result:** GRU + Learnable Omega + Prior Sigma achieved **Sharpe 0.73** (vs 0.33 in 5-asset).
+- [**Regime Model Analysis**](docs/regime_model_analysis.md): Code review and findings on the Regime Classifier.
+- [**Expert Ideas**](docs/regime_expert_ideas.md): Proposals for fixing M1 model and incorporating MIDAS/NFCI.
+
+---
+
 ## 🛠 Directory Structure
 
 ```plaintext
@@ -57,6 +67,7 @@ To solve the "Black Box" problem, we provide a full suite of interpretability to
 ├── data/                   # Data storage
 │   ├── raw/                # Raw downloads (yfinance)
 │   └── processed/          # Preprocessed tensors
+├── docs/                   # Analysis Reports & Documentation
 ├── notebooks/              # Jupyter Notebooks (Regime Test, etc.)
 ├── results/                # Output files
 │   ├── metrics/            # CSV Results (benchmark_results.csv, etc.)
@@ -64,7 +75,7 @@ To solve the "Black Box" problem, we provide a full suite of interpretability to
 ├── scripts/                # Utility & Analysis Scripts
 │   ├── run_xai.py          # XAI Analysis Runner
 │   ├── verify_assets.py
-│   └── verify_import.py
+│   └── ...
 ├── src/                    # Core Source Modules
 │   ├── data_loader.py      # Data fetching (Prices, VIX) & Preprocessing
 │   ├── loss.py             # DecisionAwareLoss implementation
@@ -134,25 +145,28 @@ python scripts/run_xai.py
 
 ## ⚙️ Configuration (`main.py`)
 
-You can tune the hyperparameters in the `config` dictionary in `main.py`:
+You can tune the hyperparameters in the `config` dictionary in `main.py`.  
+**Recommended Configuration (v2.3):**
 
-| Parameter | Default | Description |
+| Parameter | Recommended | Description |
 |---|---|---|
-| `model_type` | 'tft' | Model architecture (lstm, gru, tcn, transformer, tft) |
-| `eta` | 1.0 | Risk aversion parameter (higher = safer) |
-| `kappa_base` | 0.001 | Base transaction cost penalty |
-| `kappa_vix_scale` | 0.0001 | Sensitivity of trading cost to VIX |
-| `hidden_dim` | 64 | Hidden layer dimension |
-| `epochs` | 50 | Number of training epochs |
+| `model_type` | **'gru'** | Robust performance with lower complexity |
+| `omega_mode` | **'learnable'** | AI learns uncertainty from data |
+| `sigma_mode` | **'prior'** | Uses market covariance for stability |
+| `asset_class` | **10 Assets** | SPY, QQQ, XLV, XLP, XLE, TLT, IEF, GLD, VNQ, BIL |
 
 ---
 
-## 📊 Benchmark Results
+## 📊 Benchmark Results (10-Asset)
 
-Run `python -m src.benchmark` to generate:
-- `results/metrics/benchmark_results.csv`: Performance metrics (Sharpe, MDD, Annual Return)
-- `results/metrics/benchmark_returns.csv`: Time series of portfolio returns
-- `results/plots/benchmark_comparison.png`: Visualization chart
+Run `python -m src.benchmark` to reproduce these results.
 
----
+| Model | Sharpe | Ann. Return | MDD | Recommendation |
+|---|---|---|---|---|
+| **GRU** | **0.730** | **8.14%** | -14.12% | **🥇 Best Overall** |
+| LSTM | 0.725 | 8.08% | -14.11% | Excellent |
+| TCN | 0.721 | 8.00% | -14.08% | Strong |
+| Transformer | 0.707 | 7.86% | -13.89% | Good |
+| TFT | 0.534 | 5.48% | -15.61% | Overfitting Risk |
 
+*Note: Results based on backtest period 2007-2023.*
