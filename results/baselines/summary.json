@@ -1,0 +1,50 @@
+{
+  "1_n": {
+    "description": "1/N Equal Weight",
+    "metrics": {
+      "sharpe": 0.7588901771623272,
+      "annual_return": 0.07788149887277598,
+      "mdd": 0.14042775039177774
+    }
+  },
+  "60_40": {
+    "description": "60% SPY + 40% TLT",
+    "metrics": {
+      "sharpe": 0.07204461081802387,
+      "annual_return": 0.004144538672517568,
+      "mdd": 0.1958494082056934
+    }
+  },
+  "risk_parity": {
+    "description": "Inverse-Volatility Risk Parity",
+    "metrics": {
+      "sharpe": 0.6864023513825582,
+      "annual_return": 0.05304382854350675,
+      "mdd": 0.1425572332922875
+    }
+  },
+  "min_variance": {
+    "description": "Minimum Variance Portfolio",
+    "metrics": {
+      "sharpe": 0.6093518747340414,
+      "annual_return": 0.033285284876083975,
+      "mdd": 0.07973164474258812
+    }
+  },
+  "hrp": {
+    "description": "Hierarchical Risk Parity (HRP)",
+    "metrics": {
+      "sharpe": 0.7588901771623272,
+      "annual_return": 0.07788149887277598,
+      "mdd": 0.14042775039177774
+    }
+  },
+  "momentum": {
+    "description": "Top-5 Cross-Sectional Momentum",
+    "metrics": {
+      "sharpe": 0.7137044022287318,
+      "annual_return": 0.07928688725845699,
+      "mdd": 0.14251572038657637
+    }
+  }
+}

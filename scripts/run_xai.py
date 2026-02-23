@@ -48,7 +48,7 @@ def run_analysis():
     end_date = '2024-01-01'
     seq_length = 12
     
-    X_tensor, y_tensor, vix_tensor, scaler, asset_names, _ = prepare_training_data(
+    X_tensor, y_tensor, vix_tensor, scaler, asset_names, _, _ = prepare_training_data(
         start_date=start_date,
         end_date=end_date,
         seq_length=seq_length

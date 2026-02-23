@@ -1,0 +1,132 @@
+{
+  "full": {
+    "description": "Full Model (all components)",
+    "overrides": {},
+    "metrics": {
+      "sharpe": {
+        "mean": 0.8129923912750968,
+        "std": 0.0020703330964220285
+      },
+      "annual_return": {
+        "mean": 0.08391738727562979,
+        "std": 0.0001856639490898723
+      },
+      "mdd": {
+        "mean": 0.1108080638639945,
+        "std": 0.0001344369569819364
+      },
+      "ensemble": {
+        "sharpe": 0.8152786863819921,
+        "annual_return": 0.08410029677771291,
+        "mdd": 0.11080819283592971
+      }
+    },
+    "elapsed_sec": 1313.3
+  },
+  "no_crisis": {
+    "description": "No CrisisOverlay (regime_dim=0)",
+    "overrides": {
+      "regime_dim": "0"
+    },
+    "metrics": {
+      "sharpe": {
+        "mean": 0.8164610475925654,
+        "std": 0.002255538313817761
+      },
+      "annual_return": {
+        "mean": 0.08138504756757907,
+        "std": 0.00017950940525959574
+      },
+      "mdd": {
+        "mean": 0.11547045728398066,
+        "std": 6.38286615045406e-05
+      },
+      "ensemble": {
+        "sharpe": 0.8164982105958182,
+        "annual_return": 0.0813887686836273,
+        "mdd": 0.11547087975289053
+      }
+    },
+    "elapsed_sec": 2126.0
+  },
+  "no_momentum": {
+    "description": "No Momentum Features",
+    "overrides": {
+      "use_momentum": "False"
+    },
+    "metrics": {
+      "sharpe": {
+        "mean": 0.812765748663857,
+        "std": 0.001112471745545569
+      },
+      "annual_return": {
+        "mean": 0.08380254150128465,
+        "std": 9.285490349323894e-05
+      },
+      "mdd": {
+        "mean": 0.1108544968392546,
+        "std": 8.46793362765457e-05
+      },
+      "ensemble": {
+        "sharpe": 0.812768535589474,
+        "annual_return": 0.08380264426966805,
+        "mdd": 0.11085449788090875
+      }
+    },
+    "elapsed_sec": 1374.9
+  },
+  "no_dd_control": {
+    "description": "No Drawdown Defense (thresholds disabled)",
+    "overrides": {
+      "dd_threshold_1": "1.0",
+      "dd_threshold_2": "1.0"
+    },
+    "metrics": {
+      "sharpe": {
+        "mean": 0.8194895678460657,
+        "std": 0.0016915859671497015
+      },
+      "annual_return": {
+        "mean": 0.07960965606348738,
+        "std": 0.0002366367809874097
+      },
+      "mdd": {
+        "mean": 0.11758160080299433,
+        "std": 0.00016250452957596804
+      },
+      "ensemble": {
+        "sharpe": 0.8195160928580594,
+        "annual_return": 0.07961008179914104,
+        "mdd": 0.11758196630457565
+      }
+    },
+    "elapsed_sec": 1522.0
+  },
+  "no_regime_lev": {
+    "description": "No Regime-Adaptive Leverage (fixed 1.5x)",
+    "overrides": {
+      "bull_leverage": "1.5",
+      "crisis_leverage": "1.5"
+    },
+    "metrics": {
+      "sharpe": {
+        "mean": 0.8129923933673706,
+        "std": 0.0020703309559483504
+      },
+      "annual_return": {
+        "mean": 0.08391738741907208,
+        "std": 0.00018566425754456065
+      },
+      "mdd": {
+        "mean": 0.11080806386399451,
+        "std": 0.0001344369569819594
+      },
+      "ensemble": {
+        "sharpe": 0.8152786813888795,
+        "annual_return": 0.08410029635660685,
+        "mdd": 0.11080819283592985
+      }
+    },
+    "elapsed_sec": 1475.1
+  }
+}

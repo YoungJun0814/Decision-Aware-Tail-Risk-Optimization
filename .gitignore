@@ -26,6 +26,8 @@ MANIFEST
 
 # Environments
 .env
+.env.local
+.env.*.local
 .venv
 env/
 venv/
@@ -33,10 +35,34 @@ ENV/
 env.bak/
 venv.bak/
 
-# Data
-# data/
-# Keeping data folders but ignoring large files if needed
-# data/raw/*
-# !data/raw/.gitkeep
-# data/processed/*
-# !data/processed/.gitkeep
+# API Keys (NEVER commit these)
+*.key
+secrets.py
+config_secret.py
+
+# Model Checkpoints (large binary files)
+*.pth
+*.pt
+*.ckpt
+checkpoints/
+
+# IDE
+.vscode/settings.json
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data (raw downloads — regenerated automatically)
+data/raw/*.csv
+data/raw/*.parquet
+# data/processed/ is tracked (regime labels are committed)
+
+# Large result files (plots only — JSON summaries are committed)
+results/plots/*.png
+results/crisis_deepdive/*.png
+results/vol_sweep/*.png
+results/phase1/*.png
+results/phase1_5/*.png
+results/phase2/*.png

@@ -1,99 +1,117 @@
 # Decision-Aware Tail Risk Optimization
 
-> **Status:** Active Development (10-Asset Expansion & Regime Model Analysis Complete)
+> **Status:** Active Development — Walk-Forward Validation Complete (v4), Performance Improvement Experiments In Progress
 
 ## 📖 Project Overview
 
-This project implements a **Decision-Aware** investment strategy that optimizes for tail risk protection and superior risk-adjusted returns. Unlike traditional methods that forecast future prices (MSE loss) and then optimize, our model learns to **optimize portfolio weights directly** by backpropagating gradients through the optimization problem.
+This project implements a **Decision-Aware** portfolio optimization strategy that directly optimizes for tail risk protection and superior risk-adjusted returns. Unlike traditional methods that forecast returns (MSE loss) and then optimize separately, our model **backpropagates gradients through the optimization problem** to learn portfolio weights end-to-end.
 
-The core philosophy is **"Asymmetric Payoff"**:
-- **Upside:** Capture market growth with Long assets (SPY, QQQ, Sectors).
-- **Downside:** Defend against crashes with Safe Haven assets (TLT, GLD, BIL).
-
-## 🚀 Key Features (v2.3)
-
-### 1. Decision-Aware Learning
-We use a specialized loss function that trains the AI based on the **final portfolio performance** (Return - Risk) rather than prediction accuracy.
-- **Goal:** Maximize Sharpe Ratio / Minimize CVaR directly.
-
-### 2. Multi-Objective Loss Function (`src/loss.py`)
-Our `DecisionAwareLoss` incorporates three key terms:
-- **Return Maximization:** $\max \mu^T w$
-- **Risk Minimization:** Supports `std`, `downside_deviation`, or `cvar` modes.
-- **Dynamic Transaction Costs (κ(VIX)):** Penalizes excessive trading, especially during high volatility (high VIX) to enforce stability.
-
-### 3. Black-Litterman Integration (`src/models.py`)
-All 5 benchmark models (LSTM, GRU, TCN, Transformer, TFT) output **Black-Litterman parameters** (P, Q, Omega matrices) instead of direct weights:
-- **P:** View matrix (asset relationships)
-- **Q:** Expected return views
-- **Omega:** View uncertainty (We recommend `Learnable` mode)
-
-The BL formula combines market equilibrium with AI views for robust portfolio allocation.
-
-### 4. Robust 10-Asset Universe
-Expanded from 5 to 10 assets to capture diverse market conditions:
-- **Equity:** `SPY` (S&P 500), `QQQ` (Nasdaq 100), `XLV` (Healthcare), `XLP` (Staples), `XLE` (Energy)
-- **Bonds:** `TLT` (Long-Term), `IEF` (Mid-Term), `BIL` (T-Bills/Cash)
-- **Alternatives:** `GLD` (Gold), `VNQ` (Real Estate)
-
-### 5. Safety Net Mechanism (`src/optimization.py`)
-- **Crisis Detection:** When VIX > 30, automatically increase allocation to safe assets (BIL).
-- **CVaR Optimization:** Uses cvxpylayers for differentiable convex optimization.
-- **No Short Selling:** Long-only portfolio constraint.
-
-### 6. Explainable AI (XAI) (`src/explainability.py`)
-To solve the "Black Box" problem, we provide a full suite of interpretability tools:
-- **Gradient Saliency:** Identifies which asset's past returns influenced the decision most.
-- **TFT Variable Selection:** Visualizes which input features the model weighted most.
-- **Counterfactual Scenarios:** Simulates "What if SPY crashed?" to ensure the model reacts defensively.
+**Core Philosophy**: *"Optimize decision quality, not prediction accuracy."*
 
 ---
 
-## 📚 Analysis & Reports (New!)
+## 🏆 Latest Results (v4, Walk-Forward OOS)
 
-Detailed analysis regarding the project's recent milestones can be found in the `docs/` directory:
+> Out-of-sample: 90 months (2016.07 ~ 2024.01), 4-fold expanding window, 3-seed ensemble
 
-- [**Benchmark Analysis (10-Asset)**](docs/benchmark_analysis.md): Comparison of 5 models and Omega/Sigma settings.
-    - **Key Result:** GRU + Learnable Omega + Prior Sigma achieved **Sharpe 0.73** (vs 0.33 in 5-asset).
-- [**Regime Model Analysis**](docs/regime_model_analysis.md): Code review and findings on the Regime Classifier.
-- [**Expert Ideas**](docs/regime_expert_ideas.md): Proposals for fixing M1 model and incorporating MIDAS/NFCI.
+| Strategy | Sharpe | Ann. Return | MDD |
+|---------|--------|-------------|-----|
+| **Our Model (v4)** | **0.815** | **8.41%** | **-11.08%** |
+| 1/N Equal Weight | 0.759 | 7.79% | -14.04% |
+| HRP | 0.759 | 7.79% | -14.04% |
+| Cross-Sectional Momentum | 0.714 | 7.93% | -14.25% |
+| Risk Parity | 0.686 | 5.30% | -14.26% |
+| Min Variance | 0.609 | 3.33% | -7.97% |
+| 60/40 (SPY+TLT) | 0.072 | 0.41% | -19.58% |
+
+---
+
+## 🚀 Key Features (v4)
+
+### 1. Decision-Aware Learning
+Loss function trains the AI based on **final portfolio performance**, not prediction accuracy:
+```
+Loss = -Return + η·CVaR + κ(VIX)·Turnover + λ_dd·MaxDD + λ_dd·3×Crisis_DD
+```
+
+### 2. Black-Litterman + Differentiable CVaR
+- GRU Encoder → BL Views (P, Q, Ω) → Bayesian update → μ_BL
+- **cvxpylayers**: End-to-end differentiable CVaR optimization (β=0.95, 200 scenarios)
+
+### 3. 4-State Regime Conditioning
+HMM-based regime model (Bull / Sideways / Correction / Crisis):
+- Dynamic risk-aversion λ: Crisis→2.0×, Bull→0.5×
+- BIL floor: proportional to crisis probability (max 70%)
+
+### 4. Drawdown Control + Vol Targeting
+- Target volatility: 10% (3-month rolling)
+- DD threshold 1 (3%): early defensive mode
+- DD threshold 2 (5%): crisis mode entry
+- Regime Leverage: Bull→2.0×, Crisis→1.0×
+
+### 5. Robust 10-Asset Universe
+| Category | Tickers |
+|---------|---------|
+| Equity | SPY, QQQ, XLV, XLP, XLE |
+| Bonds | TLT, IEF, BIL |
+| Alternatives | GLD, VNQ |
+
+---
+
+## 📊 Ablation Study (Component Contribution)
+
+| Experiment | Sharpe | Return | MDD | ΔMDD |
+|-----------|--------|--------|-----|------|
+| **Full Model** (baseline) | **0.815** | **8.41%** | **-11.08%** | — |
+| No Drawdown Control | 0.820 | 7.96% | -11.76% | **+0.68%** |
+| No Crisis Overlay | 0.817 | 8.14% | -11.55% | +0.47% |
+| No Momentum | 0.813 | 8.38% | -11.09% | +0.01% |
+| No Regime Leverage | 0.815 | 8.41% | -11.08% | 0.00% |
 
 ---
 
 ## 🛠 Directory Structure
 
-```plaintext
+```
 .
-├── data/                   # Data storage
-│   ├── raw/                # Raw downloads (yfinance)
-│   └── processed/          # Preprocessed tensors
-├── docs/                   # Analysis Reports & Documentation
-├── notebooks/              # Jupyter Notebooks (Regime Test, etc.)
-├── results/                # Output files
-│   ├── metrics/            # CSV Results (benchmark_results.csv, etc.)
-│   └── plots/              # Charts (benchmark_comparison.png, xai_*.png)
-├── scripts/                # Utility & Analysis Scripts
-│   ├── run_xai.py          # XAI Analysis Runner
-│   ├── verify_assets.py
-│   └── ...
-├── src/                    # Core Source Modules
-│   ├── data_loader.py      # Data fetching (Prices, VIX) & Preprocessing
-│   ├── loss.py             # DecisionAwareLoss implementation
-│   ├── models.py           # 5 Benchmark Models (LSTM, GRU, TCN, Transformer, TFT)
-│   ├── optimization.py     # Differentiable CVaR Optimization (cvxpylayers)
-│   ├── explainability.py   # XAI Module (Saliency, TFT Analyzer, Counterfactuals)
-│   ├── trainer.py          # Training Loop & Validation
-│   ├── benchmark.py        # 5-Model Benchmark Comparison
-│   └── utils.py            # Utility functions (seed, device, MDD)
-├── main.py                 # Entry point (End-to-End Pipeline)
-└── README.md               # Documentation
+├── src/
+│   ├── data_loader.py       # Data fetching (yfinance, FRED) & preprocessing
+│   ├── models.py            # BaseBLModel + GRU/LSTM/TCN/Transformer/TFT
+│   ├── loss.py              # DecisionAwareLoss (Return + CVaR + Turnover + DD)
+│   ├── optimization.py      # Differentiable CVaR optimization (cvxpylayers)
+│   ├── trainer.py           # Training loop with 5-tuple DataLoader support
+│   ├── regime.py            # RegimeHead (Gumbel-Softmax, macro feature support)
+│   ├── gen_regime_4state.py # 4-State HMM regime label generator
+│   ├── midas.py             # MIDAS feature engineering (Phase 1)
+│   ├── midas_layer.py       # Learnable MIDAS layer (Phase 2)
+│   ├── benchmark.py         # 5-model benchmark
+│   ├── explainability.py    # XAI (Gradient Saliency, Counterfactual)
+│   └── utils.py             # Utilities (seed, device, MDD)
+├── run_walkforward.py       # Walk-Forward CV + Ensemble (main entry)
+├── run_ablation.py          # Ablation Study
+├── run_baselines.py         # Traditional strategy baselines
+├── run_vol_sweep.py         # Vol targeting parameter sweep
+├── run_crisis_deepdive.py   # Crisis period deep dive analysis
+├── run_midas_benchmark.py   # MIDAS vs baseline benchmark
+├── run_phase1_5.py          # Hyperparameter grid search
+├── main.py                  # Legacy single-run entry point
+├── data/
+│   └── processed/
+│       ├── prob_data.csv       # HMM 3-state regime probabilities
+│       └── regime_4state.csv   # HMM 4-state regime probabilities
+├── results/
+│   ├── walkforward/        # Walk-forward summary.json
+│   ├── ablation/           # Ablation summary.json
+│   ├── baselines/          # Baseline summary.json
+│   └── metrics/            # Benchmark CSVs
+└── docs/
+    ├── experiment_log.md   # Full experiment history (v1~v5)
+    └── team_report.md      # Team progress report
 ```
 
 ---
 
 ## 💻 Installation
-
-To avoid C++ compilation errors with `cvxpy` and `cvxpylayers` on Windows, we **strongly recommend** using Conda.
 
 ### 1. Clone & Create Environment
 ```bash
@@ -104,69 +122,78 @@ conda create -n tail_risk_opt python=3.10 -y
 conda activate tail_risk_opt
 ```
 
-### 2. Install Solvers (Conda)
+### 2. Install Solvers (Conda — required for Windows)
 ```bash
-# Installing binary wheels prevents build errors
 conda install -c conda-forge cvxpy pyportfolioopt -y
 ```
 
-### 3. Install Dependencies (Pip)
+### 3. Install Python Dependencies
 ```bash
 pip install -r requirements.txt
 ```
+
+### 4. Set FRED API Key (optional — for macro features)
+```powershell
+# Windows PowerShell
+$env:FRED_API_KEY = 'your_fred_api_key_here'
+
+# Linux / Mac
+export FRED_API_KEY='your_fred_api_key_here'
+```
+> Get a free key at [https://fred.stlouisfed.org/docs/api/api_key.html](https://fred.stlouisfed.org/docs/api/api_key.html)
 
 ---
 
 ## 🏃 Usage
 
-### Train the Model
-Run the full pipeline (Data -> Model -> Train -> Evaluate):
+### Walk-Forward Validation (Main Experiment)
 ```bash
-python main.py
-```
-*Expected Output:*
-- Data loading logs (including VIX)
-- Training progress (Loss decreasing)
-- Sample portfolio weights showing diversification
-
-### Run 5-Model Benchmark
-Compare 5 deep learning models (LSTM, GRU, TCN, Transformer, TFT):
-```bash
-python -m src.benchmark
+python run_walkforward.py
+# Results saved to results/walkforward/summary.json
 ```
 
-### Run XAI Analysis
-Analyze model decisions with explainability tools:
+### Ablation Study
 ```bash
-python scripts/run_xai.py
+python run_ablation.py
+# Results saved to results/ablation/summary.json
+```
+
+### Traditional Strategy Baselines
+```bash
+python run_baselines.py
+# Results saved to results/baselines/summary.json
+```
+
+### Volatility Sweep
+```bash
+python run_vol_sweep.py
+# Efficient frontier across target_vol=[4%~20%]
 ```
 
 ---
 
-## ⚙️ Configuration (`main.py`)
+## ⚙️ Configuration (`run_walkforward.py`)
 
-You can tune the hyperparameters in the `config` dictionary in `main.py`.  
-**Recommended Configuration (v2.3):**
-
-| Parameter | Recommended | Description |
-|---|---|---|
-| `model_type` | **'gru'** | Robust performance with lower complexity |
-| `omega_mode` | **'learnable'** | AI learns uncertainty from data |
-| `sigma_mode` | **'prior'** | Uses market covariance for stability |
-| `asset_class` | **10 Assets** | SPY, QQQ, XLV, XLP, XLE, TLT, IEF, GLD, VNQ, BIL |
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| `model_type` | `'gru'` | Best bias-variance tradeoff |
+| `omega_mode` | `'learnable'` | AI learns BL view uncertainty |
+| `sigma_mode` | `'prior'` | Uses market covariance for stability |
+| `hidden_dim` | `32` | Optimal for ~200 monthly samples |
+| `regime_dim` | `4` | 4-State HMM regime conditioning |
+| `lambda_risk` | `2.0` | CVaR penalty weight |
+| `lambda_dd` | `2.0` | Drawdown penalty (×3 in Crisis) |
+| `target_vol` | `10%` | Portfolio volatility target |
+| `n_seeds` | `3` | Ensemble averaging |
 
 ---
 
-## 📊 Benchmark Results (10-Asset)
+## 📈 Version History
 
-Run `python -m src.benchmark` to reproduce these results.
-
-| Model | Sharpe | Ann. Return | MDD | Recommendation |
-|---|---|---|---|---|
-| **GRU** | **0.730** | **8.14%** | -14.12% | **🥇 Best Overall** |
-| LSTM | 0.725 | 8.08% | -14.11% | Excellent |
-| TCN | 0.721 | 8.00% | -14.08% | Strong |
-| Transformer | 0.707 | 7.86% | -13.89% | Good |
-| TFT | 0.534 | 5.48% | -15.61% | Overfitting Risk |
-
-*Note: Results based on backtest period 2007-2023.*
+| Version | Key Change | Sharpe | Return | MDD |
+|---------|-----------|--------|--------|-----|
+| v1 (5-asset) | Baseline BL+CVaR | 0.335 | 3.0% | -16.7% |
+| v2 (10-asset) | Universe expansion | 0.730 | 8.1% | -14.1% |
+| v3 (Regime) | 4-State HMM + MIDAS | ~0.748 | ~8.3% | ~-13.5% |
+| **v4 (Walk-Forward)** | Full architecture + OOS | **0.815** | **8.41%** | **-11.08%** |
+| v5 (Macro) | RegimeHead + T10Y3M/BAA10Y | 0.812 | 8.38% | -11.10% |

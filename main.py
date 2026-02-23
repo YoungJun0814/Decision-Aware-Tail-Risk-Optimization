@@ -93,7 +93,7 @@ def main():
     print("=" * 70)
     
     # v2: prepare_training_data는 이제 vix_tensor와 y_dates도 반환합니다
-    X, y, vix, scaler, asset_names, _ = prepare_training_data(
+    X, y, vix, scaler, asset_names, *_ = prepare_training_data(
         start_date=config['start_date'],
         end_date=config['end_date'],
         seq_length=config['seq_length'],

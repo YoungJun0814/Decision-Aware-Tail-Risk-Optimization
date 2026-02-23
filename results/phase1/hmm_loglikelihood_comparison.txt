@@ -1,0 +1,19 @@
+HMM Log-Likelihood 비교
+==================================================
+
+HMM 설정:
+  States: 2
+  Covariance Type: diag
+  Max Iterations: 200
+  Random Restarts: 5
+
+Log-Likelihood (총합):
+  MIDAS VIX:  -417.750640
+  월말 VIX:   -408.390725
+  차이:       -9.359915
+
+Log-Likelihood (샘플당):
+  MIDAS VIX:  -2.921333
+  월말 VIX:   -2.855879
+
+결과: 월말 우세

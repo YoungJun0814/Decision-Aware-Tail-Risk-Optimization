@@ -201,7 +201,7 @@ def _load_benchmark_data(config):
     set_seed(config['seed'])
     
     print("데이터 로딩 중...")
-    X_tensor, y_tensor, vix_tensor, scaler, asset_names, y_dates = prepare_training_data(
+    X_tensor, y_tensor, vix_tensor, scaler, asset_names, y_dates, _ = prepare_training_data(
         start_date=config['start_date'],
         end_date=config['end_date'],
         seq_length=config['seq_length']

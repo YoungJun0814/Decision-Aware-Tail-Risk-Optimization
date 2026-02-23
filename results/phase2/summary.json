@@ -1,0 +1,12 @@
+{
+  "model": "RegimeConditionedBLModel",
+  "params": 5727,
+  "n_seeds": 5,
+  "sharpe_mean": 0.7521463043968581,
+  "sharpe_std": 0.01147128908212436,
+  "annual_return_mean": 0.0826629251241684,
+  "mdd_mean": 0.1398368626832962,
+  "baseline_sharpe": 0.6750495039563119,
+  "baseline_annual_return": 0.0756611721950223,
+  "baseline_mdd": 0.14042770730776685
+}

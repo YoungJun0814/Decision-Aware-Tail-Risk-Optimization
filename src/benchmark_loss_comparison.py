@@ -134,7 +134,7 @@ def run_comparison():
     
     # Load Data
     print("Loading Data...")
-    X_tensor, y_tensor, vix_tensor, scaler, asset_names, y_dates = prepare_training_data(
+    X_tensor, y_tensor, vix_tensor, scaler, asset_names, y_dates, _ = prepare_training_data(
         start_date=CONFIG['start_date'],
         end_date=CONFIG['end_date'],
         seq_length=CONFIG['seq_length']
