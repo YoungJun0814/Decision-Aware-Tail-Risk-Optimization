@@ -17,6 +17,7 @@ Usage:
 import os
 import json
 import numpy as np
+import pandas as pd
 from scipy.optimize import minimize
 from scipy.cluster.hierarchy import linkage, leaves_list
 from scipy.spatial.distance import squareform
@@ -174,7 +175,8 @@ def strategy_hrp(returns, lookback=24, **kwargs):
             w = np.maximum(w, 0.0)
             w = w / (w.sum() + 1e-10)
             weights[t] = w
-        except Exception:
+        except Exception as e:
+            print(f"[ERROR] HRP failed at step {t}: {e}")
             pass
     
     return weights
@@ -225,6 +227,60 @@ STRATEGIES = {
         'func': strategy_momentum,
     },
 }
+
+
+def run_baselines(config=None):
+    """
+    전통 전략 6종의 OOS 월간 수익률을 {전략명: pd.Series} 딕셔너리로 반환.
+    run_compare.py에서 호출됨.
+    """
+    if config is None:
+        config = CONFIG
+    
+    _, asset_returns_df = get_monthly_asset_data(
+        ASSET_TICKERS, config['start_date'], config['end_date'])
+    
+    X, y, vix, scaler, asset_names, y_dates, _ = prepare_training_data(
+        start_date=config['start_date'],
+        end_date=config['end_date'],
+        seq_length=config['seq_length'],
+        normalize=True,
+        use_momentum=False,
+    )
+    
+    y_raw = asset_returns_df.reindex(y_dates).values
+    y_raw = np.nan_to_num(y_raw, nan=0.0)
+    
+    n_samples = min(len(X), len(y_raw))
+    y_raw = y_raw[:n_samples]
+    dates = y_dates[:n_samples]
+    
+    folds = define_folds(dates, config['seq_length'])
+    all_test_idx = np.concatenate([f['test_idx'] for f in folds])
+    all_test_returns = y_raw[all_test_idx]
+    all_test_dates = dates[all_test_idx]
+    
+    full_returns = y_raw
+    n_assets = len(ASSET_TICKERS)
+    
+    # 1/N Equal Weight
+    equal_w = np.ones((len(all_test_returns), n_assets)) / n_assets
+    
+    all_strategies = {'1/N': equal_w}
+    
+    for strat_name, strat_info in STRATEGIES.items():
+        full_weights = strat_info['func'](full_returns, asset_names=asset_names)
+        oos_weights = full_weights[all_test_idx]
+        all_strategies[strat_info['desc']] = oos_weights
+    
+    # 월간 수익률 Series로 변환
+    result = {}
+    dt_index = pd.DatetimeIndex(all_test_dates, name='date')
+    for name, weights in all_strategies.items():
+        port_ret = (weights * all_test_returns).sum(axis=1)
+        result[name] = pd.Series(port_ret, index=dt_index, name=name)
+    
+    return result
 
 
 def main():

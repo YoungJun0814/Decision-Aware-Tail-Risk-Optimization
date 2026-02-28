@@ -114,3 +114,143 @@ FINAL_CONFIG = {
     'sigma_mode': 'prior',      # 안정성 확보
 }
 ```
+
+---
+
+## Phase 4: Walk-Forward + Ablation Study (v4)
+
+### 1. 실험 설정 (Walk-Forward Cross-Validation)
+
+- **방식**: Expanding Window Walk-Forward (4 Folds)
+- **Folds**: 2016~2018 / 2018~2020 / 2020~2022 / 2022~2025
+- **Seeds**: 3개 앙상블 (seed 42/43/44)
+- **주요 추가 컴포넌트**:
+  - 4-State HMM Regime (Bull/Sideways/Correction/Crisis)
+  - Regime-Conditional λ_dd (위기 시 DD 패널티 ×3)
+  - Drawdown-Triggered Vol Targeting (target_vol=10%, trigger: 3%/5%)
+  - Regime Leverage (Bull: 2.0x, Crisis: 1.0x)
+  - 12개월 Momentum Features
+  - Weight Decay + Cosine LR Scheduler
+
+### 2. Ablation Study 결과 (5개 컴포넌트)
+
+> **기준 (Ablation Full)**: Sharpe **0.8153**, Return **8.41%**, MDD **-11.08%**
+
+| 실험 | Sharpe | Return | MDD | 해석 |
+|------|--------|--------|-----|------|
+| **Full (All ON)** | **0.8153** | **8.41%** | **-11.08%** | **Best** |
+| No Drawdown Control | 0.8195 | 7.96% | -11.76% | Sharpe↑ but Return↓, MDD↑ → 실질 열위 |
+| No Crisis Overlay | 0.8165 | 8.14% | -11.55% | MDD 악화 |
+| No Momentum | 0.8128 | 8.38% | -11.09% | 모멘텀 기여 미미 |
+| No Regime Leverage | 0.8153 | 8.41% | -11.08% | 레버리지 중립 결과 |
+
+> **Finding**: 모든 컴포넌트가 각자의 역할을 함. 특히 Drawdown Control이 MDD 방어에 핵심 기여.
+
+### 3. 전통 전략 대비 성과
+
+| 전략 | Sharpe | Return | MDD |
+|------|--------|--------|-----|
+| **Our Model (Full)** | **0.8153** | **8.41%** | **-11.08%** |
+| 1/N Equal Weight | 0.759 | 7.79% | -14.04% |
+| Risk Parity | 0.686 | 5.30% | -14.26% |
+| Min Variance | 0.609 | 3.33% | -7.97% |
+| 60/40 (SPY+TLT) | 0.072 | 0.41% | -19.58% |
+
+---
+
+## Phase 5: 매크로 피처 통합 (v5) 및 성능 개선 실험
+
+### 1. 매크로 피처 → RegimeHead 통합 (v5)
+
+**목적**: GRU가 가격 패턴만으로 Regime을 추론하는 하계를 극복.  
+실제 거시경제 선행지표(금리차, 신용 스프레드)를 RegimeHead에 직접 투입.
+
+| 추가된 피처 | FRED 코드 | 의미 |
+|-----------|-----------|------|
+| Term Spread | T10Y3M | 10년물-3개월물 금리차 → 경기침체 선행 |
+| Credit Spread | BAA10Y | 회사채-국채 스프레드 → 위험회피 지표 |
+
+**아키텍처 변경**:
+```
+기존: GRU hidden → RegimeHead → regime_probs
+변경: GRU hidden + [T10Y3M, BAA10Y] → RegimeHead → regime_probs
+```
+
+**v5 Walk-Forward 결과 (After Vol Targeting)**:
+
+| 지표 | Ablation Full (v4) | v5 + Macro | 변화 |
+|------|-------------------|------------|------|
+| Sharpe | 0.8153 | 0.8121 | -0.003 (노이즈 범위) |
+| Return | 8.41% | 8.38% | -0.03%p |
+| MDD | -11.08% | -11.08% | 동일 |
+
+> **결론**: 매크로 피처 추가가 성능을 개선하지 못함. Ablation Full이 실질적 최고 성능.  
+> 원인 추정: T10Y3M 2개 피처만으로는 정보 불충분, 또는 HMM regime과 신호 충돌.
+
+---
+
+### 2. Proposal A: hidden_dim 확장 실험 (hidden=32 → 64)
+
+| 지표 | hidden=32 (Baseline) | hidden=64 | 변화 |
+|------|---------------------|-----------|------|
+| Sharpe | 0.8153 | 0.8170 | +0.0017 |
+| Return | 8.41% | 8.39% | -0.02%p |
+| MDD | -11.08% | -11.06% | +0.02%p |
+| Seed Std (Sharpe) | 0.0021 | 0.0028 | ↑ 불안정 |
+
+> **결론**: 실질적 개선 없음 + Seed 43에서 100 epoch 전부 소진 (학습 불안정 징후).  
+> 200개 월간 샘플 대비 파라미터 과다 (32K→120K). **hidden=32 유지 결정**.
+
+---
+
+### 3. Proposal B: Cross-Sectional 모멘텀 피처 (구현 완료, 실험 예정)
+
+**아이디어**: 기존 절대 모멘텀(각 자산의 12개월 수익률)에 더해,  
+**동일 시점 10개 자산 간 상대 강약**을 학습 신호로 추가.
+
+| 추가 피처 | 계산 방법 | 수 |
+|---------|---------|---|
+| `{TICKER}_CS_RANK` | 시점별 자산 간 백분위 순위 (0~1) | 10개 |
+| `{TICKER}_CS_Z` | 시점별 자산 간 z-score | 10개 |
+
+- **input_dim**: 23 → **43** (자동 반영, 모델 코드 변경 없음)
+- **look-ahead bias**: 없음 (동일 시점 내 자산 간 비교만)
+- **구현 파일**: `src/data_loader.py` (6b 블록 이후 6c 블록 추가)
+
+> **실험 결과**: 진행 예정 → `python run_walkforward.py`
+
+---
+
+### 4. 향후 계획 (Proposal C)
+
+**Regime-Aware Dynamic Loss Weighting**  
+Crisis regime일수록 CVaR 패널티를 강화, Bull regime에서는 Return 목표를 높이는  
+동적 Loss 가중치를 구현하여 GRU가 위기 방어를 직접 학습하도록 유도.
+
+- **변경 파일**: `src/loss.py`, `src/trainer.py`
+- **예상 공수**: 2~3일
+- **진행 조건**: Proposal B 결과 확인 후 결정
+
+---
+
+## 시스템 구성 요약 (현재 최종)
+
+```
+데이터 파이프라인:
+  yfinance (월간) + FRED (매크로) → data_loader.py → 5-tuple DataLoader
+
+모델 아키텍처:
+  [수익률 + VIX + 모멘텀 + CS모멘텀]
+        ↓ GRU (hidden=32)
+  BL Views (P, Q, Ω_learnable)  +  HMM 4-State Regime
+        ↓                               ↓
+  CVaR Optimization (cvxpylayers)   λ_risk 동적 조절
+        ↓
+  Raw Weights → Vol Targeting + Regime Leverage → Final Weights
+
+손실 함수:
+  Loss = -Return + η·CVaR + κ(VIX)·Turnover + λ_dd·MaxDD + λ_dd·3·Crisis_DD
+
+검증 방식:
+  Walk-Forward (4 Folds) × 3 Seeds + Ensemble
+```

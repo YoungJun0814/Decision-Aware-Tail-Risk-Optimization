@@ -102,12 +102,20 @@ class Trainer:
             
             weights = self.model(batch_X, **fwd_kwargs)
             
+            # 2b. E2E Regime: model returns (weights, e2e_regime_probs)
+            e2e_regime_probs = None
+            if isinstance(weights, tuple):
+                weights, e2e_regime_probs = weights
+            
             # 3. 손실 계산 (v3: SharpeLoss는 vix + regime_probs 인자 지원)
             loss_args = [weights, batch_y]
             loss_kwargs = {}
             if batch_vix is not None:
                 loss_args.append(batch_vix)
-            if batch_regime is not None:
+            if e2e_regime_probs is not None:
+                # E2E 모드: 모델이 생성한 regime_probs를 loss에 전달
+                loss_kwargs['regime_probs'] = e2e_regime_probs
+            elif batch_regime is not None:
                 loss_kwargs['regime_probs'] = batch_regime
             
             loss = self.loss_fn(*loss_args, **loss_kwargs)
@@ -115,6 +123,18 @@ class Trainer:
             # Loss가 tuple이면 첫 번째 원소 사용 (DetailedDecisionAwareLoss 호환)
             if isinstance(loss, tuple):
                 loss = loss[0]
+            
+            # 3b. E2E Regime KL Loss (Teacher-Student)
+            if e2e_regime_probs is not None and batch_regime is not None:
+                # KL(HMM || Neural): HMM을 target, Neural을 prediction으로
+                kl_loss = torch.nn.functional.kl_div(
+                    torch.log(e2e_regime_probs + 1e-8),
+                    batch_regime,
+                    reduction='batchmean'
+                )
+                # λ_KL cosine annealing: epoch 진행에 따라 감소
+                lambda_kl = getattr(self, '_lambda_kl', 0.5)
+                loss = loss + lambda_kl * kl_loss
             
             # 4. Backward pass
             loss.backward()
@@ -185,16 +205,33 @@ class Trainer:
             
             weights = self.model(batch_X, **fwd_kwargs)
             
+            # E2E Regime: unpack tuple
+            e2e_regime_probs = None
+            if isinstance(weights, tuple):
+                weights, e2e_regime_probs = weights
+            
             loss_args = [weights, batch_y]
             loss_kwargs = {}
             if batch_vix is not None:
                 loss_args.append(batch_vix)
-            if batch_regime is not None:
+            if e2e_regime_probs is not None:
+                loss_kwargs['regime_probs'] = e2e_regime_probs
+            elif batch_regime is not None:
                 loss_kwargs['regime_probs'] = batch_regime
             
             loss = self.loss_fn(*loss_args, **loss_kwargs)
             if isinstance(loss, tuple):
                 loss = loss[0]
+            
+            # E2E KL Loss
+            if e2e_regime_probs is not None and batch_regime is not None:
+                kl_loss = torch.nn.functional.kl_div(
+                    torch.log(e2e_regime_probs + 1e-8),
+                    batch_regime,
+                    reduction='batchmean'
+                )
+                lambda_kl = getattr(self, '_lambda_kl', 0.5)
+                loss = loss + lambda_kl * kl_loss
             
             total_loss += loss.item()
             num_batches += 1
@@ -252,6 +289,14 @@ class Trainer:
             if scheduler is not None:
                 scheduler.step()
             
+            # E2E Regime: temperature + KL weight annealing
+            if hasattr(self.model, 'e2e_regime_head'):
+                self.model.e2e_regime_head.anneal_tau(epoch, epochs)
+                # KL weight: cosine annealing 1.0 -> 0.05
+                import math
+                progress = min(epoch / max(epochs, 1), 1.0)
+                self._lambda_kl = 0.05 + (1.0 - 0.05) * 0.5 * (1.0 + math.cos(math.pi * progress))
+            
             # 진행 상황 출력
             if verbose:
                 msg = f"Epoch {epoch + 1}/{epochs} - Train Loss: {train_loss:.6f}"
@@ -293,7 +338,12 @@ class Trainer:
         if macro_features is not None and getattr(self.model, 'macro_dim', 0) > 0:
             fwd_kwargs['macro_features'] = macro_features.to(self.device)
         
-        return self.model(X, **fwd_kwargs)
+        result = self.model(X, **fwd_kwargs)
+        
+        # E2E Regime: unpack tuple, return only weights
+        if isinstance(result, tuple):
+            return result[0]
+        return result
 
 
 # =============================================================================

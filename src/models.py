@@ -42,7 +42,9 @@ class BaseBLModel(nn.Module):
     def __init__(self, input_dim: int, num_assets: int, hidden_dim: int, dropout: float = 0.2,
                  omega_mode: str = 'learnable', sigma_mode: str = 'prior',
                  lambda_risk: float = 0.0, regime_dim: int = 0,
-                 macro_dim: int = 0, max_bil_floor: float = 0.5):
+                 macro_dim: int = 0, max_bil_floor: float = 0.5,
+                 dist_type: str = 't', t_df: float = 5.0,
+                 e2e_regime: bool = False):
         super(BaseBLModel, self).__init__()
         self.num_assets = num_assets
         self.dropout = dropout
@@ -51,6 +53,7 @@ class BaseBLModel(nn.Module):
         self.lambda_risk = lambda_risk
         self.regime_dim = regime_dim
         self.macro_dim = macro_dim
+        self.e2e_regime = e2e_regime
         
         # --- 전망(View) 생성 헤드 ---
         # Q head: regime_dim > 0 이면 concat(hidden, regime) → Q
@@ -91,13 +94,27 @@ class BaseBLModel(nn.Module):
                 macro_dim=macro_dim,
             )
         
+        # --- E2E RegimeHead (e2e_regime=True 시 활성화) ---
+        # GRU hidden state만으로 regime 확률을 End-to-End 학습
+        # HMM prob은 KL loss target으로만 사용 (Teacher-Student)
+        if e2e_regime and regime_dim > 0:
+            from src.regime import RegimeHead
+            self.e2e_regime_head = RegimeHead(
+                hidden_dim=hidden_dim,
+                n_regimes=regime_dim,
+                macro_dim=0,  # GRU hidden만 사용
+            )
+        
         # --- 최적화 레이어 ---
+        n_scenarios = max(200, num_assets * 20)  # 자산 수에 비례 (13자산→260)
         self.opt_layer = CVaROptimizationLayer(
             num_assets=num_assets,
-            num_scenarios=200,
+            num_scenarios=n_scenarios,
             confidence_level=0.95,
-            bil_index=9,
-            safety_threshold=0.5
+            bil_index=num_assets - 1,  # BIL = 마지막 자산 (10→idx9, 13→idx12)
+            safety_threshold=0.5,
+            dist_type=dist_type,
+            t_df=t_df
         )
 
     def get_bl_parameters(self, hidden_features: torch.Tensor, sigma: torch.Tensor = None,
@@ -237,8 +254,12 @@ class BaseBLModel(nn.Module):
         Args:
             x: (Batch, Seq, Feat) - 자산 수익률 또는 특징 데이터
             is_crisis: 1.0이면 위기 상황(VIX > 30)으로 간주하여 안전망 가동.
-            regime_probs: (B, R) regime 확률 (v4, optional)
+            regime_probs: (B, R) regime 확률 (v4, optional. E2E일 때는 HMM target)
             macro_features: (B, macro_dim) 매크로 피처 (optional, RegimeHead 전용)
+        
+        Returns:
+            weights: (B, N) when e2e_regime=False
+            (weights, e2e_regime_probs): when e2e_regime=True
         """
         bs, seq_len, _ = x.size()
         device = x.device
@@ -256,12 +277,21 @@ class BaseBLModel(nn.Module):
         # 1. 인코딩
         hidden = self.encode(x) 
         
-        # 1.5. 매크로 RegimeHead (내부 Regime 생성, macro_dim > 0일 때)
+        # 1.5a. E2E RegimeHead (hidden만으로 regime 확률 생성)
+        e2e_regime_probs = None
+        if self.e2e_regime and hasattr(self, 'e2e_regime_head'):
+            e2e_regime_probs = self.e2e_regime_head(hidden)
+            # E2E가 생성한 regime_probs로 교체 (외부 HMM은 KL target으로만 사용)
+            regime_probs_for_model = e2e_regime_probs
+        else:
+            regime_probs_for_model = regime_probs
+        
+        # 1.5b. 매크로 RegimeHead (내부 Regime 생성, macro_dim > 0일 때)
         if hasattr(self, 'macro_regime_head') and macro_features is not None:
-            regime_probs = self.macro_regime_head(hidden, macro_features=macro_features)
+            regime_probs_for_model = self.macro_regime_head(hidden, macro_features=macro_features)
         
         # 2. 뷰 생성 (v4: regime_probs를 Q head에 전달)
-        p, q, omega = self.get_bl_parameters(hidden, sigma=sigma, regime_probs=regime_probs)
+        p, q, omega = self.get_bl_parameters(hidden, sigma=sigma, regime_probs=regime_probs_for_model)
         
         # 3. Black-Litterman 공식
         mu_bl, sigma_out = self.black_litterman_formula(p, q, omega, pi, sigma)
@@ -271,8 +301,12 @@ class BaseBLModel(nn.Module):
                                   lambda_risk=self.lambda_risk)
         
         # 5. Crisis Overlay (v4: regime_dim > 0 일 때만)
-        if self.regime_dim > 0 and regime_probs is not None and hasattr(self, 'crisis_overlay'):
-            weights = self.crisis_overlay(weights, regime_probs)
+        if self.regime_dim > 0 and regime_probs_for_model is not None and hasattr(self, 'crisis_overlay'):
+            weights = self.crisis_overlay(weights, regime_probs_for_model)
+        
+        # 6. E2E 모드: (weights, regime_probs) 반환하여 KL loss 계산 가능
+        if self.e2e_regime and e2e_regime_probs is not None:
+            return weights, e2e_regime_probs
         
         return weights
         
@@ -286,8 +320,10 @@ class BaseBLModel(nn.Module):
 
 class LSTMModel(BaseBLModel):
     def __init__(self, input_dim, num_assets, hidden_dim=64, num_layers=2, dropout=0.2,
-                 omega_mode='learnable', sigma_mode='prior', lambda_risk=0.0):
-        super().__init__(input_dim, num_assets, hidden_dim, dropout, omega_mode, sigma_mode, lambda_risk)
+                 omega_mode='learnable', sigma_mode='prior', lambda_risk=0.0,
+                 dist_type='t', t_df=5.0):
+        super().__init__(input_dim, num_assets, hidden_dim, dropout, omega_mode, sigma_mode, lambda_risk,
+                         dist_type=dist_type, t_df=t_df)
         self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True, dropout=dropout if num_layers > 1 else 0)
     
     def encode(self, x):
@@ -297,9 +333,10 @@ class LSTMModel(BaseBLModel):
 class GRUModel(BaseBLModel):
     def __init__(self, input_dim, num_assets, hidden_dim=64, num_layers=2, dropout=0.2,
                  omega_mode='learnable', sigma_mode='prior', lambda_risk=0.0, regime_dim=0,
-                 macro_dim=0, max_bil_floor=0.5):
+                 macro_dim=0, max_bil_floor=0.5, dist_type='t', t_df=5.0, e2e_regime=False):
         super().__init__(input_dim, num_assets, hidden_dim, dropout, omega_mode, sigma_mode, 
-                         lambda_risk, regime_dim, macro_dim, max_bil_floor)
+                         lambda_risk, regime_dim, macro_dim, max_bil_floor, dist_type=dist_type, t_df=t_df,
+                         e2e_regime=e2e_regime)
         self.gru = nn.GRU(input_dim, hidden_dim, num_layers, batch_first=True, dropout=dropout if num_layers > 1 else 0)
     
     def encode(self, x):
@@ -731,7 +768,8 @@ class RegimeFiLMGRU(nn.Module):
 
 def get_model(model_type, input_dim, num_assets, device='cpu',
               omega_mode='learnable', sigma_mode='prior', lambda_risk=0.0,
-              hidden_dim=64, regime_dim=0, macro_dim=0, max_bil_floor=0.5):
+              hidden_dim=64, regime_dim=0, macro_dim=0, max_bil_floor=0.5,
+              dist_type='t', t_df=5.0, e2e_regime=False):
     """
     모델 팩토리 함수 (v4: regime_dim, macro_dim, hidden_dim, max_bil_floor 지원).
     """
@@ -746,10 +784,15 @@ def get_model(model_type, input_dim, num_assets, device='cpu',
         input_dim=input_dim, num_assets=num_assets, hidden_dim=hidden_dim,
         omega_mode=omega_mode, sigma_mode=sigma_mode, lambda_risk=lambda_risk
     )
+    if model_type in ['gru', 'lstm']:
+        kwargs['dist_type'] = dist_type
+        kwargs['t_df'] = t_df
+        
     if model_type == 'gru' and regime_dim > 0:
         kwargs['regime_dim'] = regime_dim
         kwargs['macro_dim'] = macro_dim
         kwargs['max_bil_floor'] = max_bil_floor
+        kwargs['e2e_regime'] = e2e_regime
     
     return model_map[model_type](**kwargs).to(device)
 

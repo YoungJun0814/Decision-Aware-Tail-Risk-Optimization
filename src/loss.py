@@ -151,16 +151,44 @@ class DecisionAwareLoss(nn.Module):
             dd_penalty = drawdowns.max()
         
         # ======================================================================
-        # Total Loss (v4: regime-conditional λ_dd)
+        # Total Loss (v6: Regime-Aware Dynamic Weighting — Proposal C)
         # ======================================================================
+        # regime_probs는 detach()로 gradient 차단:
+        # Loss 스케일링 용도이지, regime classifier를 역으로 학습시키면 안 됨.
+        # 
+        # Scaling 설계:
+        #   η (risk):     Crisis↑ → CVaR 패널티 강화 (방어 강화)
+        #                 Bull↑   → CVaR 패널티 완화 (공격적 투자)
+        #   κ (turnover): Crisis↑ → 거래비용 증가 (포지션 동결)  
+        #   λ_dd:         Crisis↑ → DD 패널티 강화 (기존 v4 로직 유지)
+        # ======================================================================
+        
+        effective_eta = self.eta
         effective_lambda_dd = self.lambda_dd
-        if regime_probs is not None and self.lambda_dd > 0:
-            p_crisis = regime_probs[:, -1].mean()  # batch 평균 crisis 확률
-            effective_lambda_dd = self.lambda_dd * (1 + self.regime_dd_scale * p_crisis)
+        
+        if regime_probs is not None:
+            # gradient 차단 — 순수 스케일링 목적
+            rp = regime_probs.detach()
+            p_crisis = rp[:, -1].mean()    # 마지막 열 = Crisis 확률
+            p_bull   = rp[:, 0].mean()     # 첫 번째 열 = Bull 확률
+            
+            # --- η 동적 조절 ---
+            # Crisis → η ×(1 + 2*p_crisis), Bull → η ×(1 - 0.3*p_bull)
+            # 클리핑으로 안정성 보장 (0.5 ≤ effective_eta ≤ 3.0 * eta)
+            eta_scale = 1.0 + 2.0 * p_crisis - 0.3 * p_bull
+            effective_eta = self.eta * torch.clamp(eta_scale, 0.5, 3.0)
+            
+            # --- κ 동적 조절 (Crisis 시 turnover 추가 억제, implicit) ---
+            # Crisis에서 turnover_cost를 1.5배로 스케일링
+            turnover_cost = turnover_cost * (1.0 + 0.5 * p_crisis)
+            
+            # --- λ_dd 동적 조절 (기존 v4 로직 유지) ---
+            if self.lambda_dd > 0:
+                effective_lambda_dd = self.lambda_dd * (1 + self.regime_dd_scale * p_crisis)
         
         total_loss = (
             return_loss
-            + self.eta * risk_penalty
+            + effective_eta * risk_penalty
             + turnover_cost
             + effective_lambda_dd * dd_penalty
         )

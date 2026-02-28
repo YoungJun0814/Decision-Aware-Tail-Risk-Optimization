@@ -44,6 +44,17 @@ except ImportError:
 # 자산 유니버스 (10개) — BIL은 반드시 마지막 (CVaR 안전장치 인덱스)
 ASSET_TICKERS = ['SPY', 'QQQ', 'XLV', 'XLP', 'XLE', 'TLT', 'IEF', 'GLD', 'VNQ', 'BIL']
 
+# 확장 자산 유니버스 (13개) — TIP(TIPS Bond ETF), DBC, ACWX 추가 | BIL은 반드시 마지막
+ASSETS_13 = ['SPY', 'QQQ', 'XLV', 'XLP', 'XLE', 'TLT', 'IEF', 'GLD', 'VNQ',
+             'TIP', 'DBC', 'ACWX', 'BIL']
+
+# 상관관계 피처용 자산 쌍 (위기 감지에 중요한 3개)
+# ① SPY-TLT: 주식-채권 동조(위기 시 양의 상관→패닉 셀링 감지)
+# ② SPY-GLD: 금 피신 수요(위기 시 음의 상관 → 안전자산 수요)
+# ③ QQQ-XLP: 공격 vs 방어 섹터(위기 시 QQQ 폭락, XLP 방어)
+CORR_PAIRS = [('SPY', 'TLT'), ('SPY', 'GLD'), ('QQQ', 'XLP')]
+CORR_WINDOW = 12  # 12개월 롤링 (월간 데이터 → 최소 12개 관측치 필요)
+
 # VIX 티커 (Loss 함수에서 시장 상황 반영을 위해 사용)
 VIX_TICKER = '^VIX'
 
@@ -313,6 +324,283 @@ def create_sequences(data: np.ndarray, seq_length: int) -> tuple:
     return np.array(X), np.array(y)
 
 
+def compute_rolling_corr(returns_df: pd.DataFrame,
+                         pairs: list = None,
+                         window: int = None) -> pd.DataFrame:
+    """
+    핵심 자산 쌍의 롤링 상관계수를 계산합니다.
+    
+    Parameters:
+        returns_df: 자산 수익률 DataFrame (columns = ticker names)
+        pairs: 상관계수를 계산할 자산 쌍 리스트 (default: CORR_PAIRS)
+        window: 롤링 윈도우 크기 (default: CORR_WINDOW=12개월)
+    
+    Returns:
+        DataFrame with columns like 'CORR_SPY_TLT', 'CORR_SPY_GLD', 'CORR_QQQ_XLP'
+    """
+    if pairs is None:
+        pairs = CORR_PAIRS
+    if window is None:
+        window = CORR_WINDOW
+    
+    corr_features = {}
+    for a, b in pairs:
+        if a in returns_df.columns and b in returns_df.columns:
+            corr_features[f'CORR_{a}_{b}'] = (
+                returns_df[a].rolling(window)
+                .corr(returns_df[b])
+                .fillna(0.0)
+            )
+        else:
+            print(f"[WARNING] 상관관계 피처 스킵: {a} 또는 {b}가 데이터에 없습니다.")
+    
+    return pd.DataFrame(corr_features, index=returns_df.index)
+
+
+def compute_daily_panic_features(start_date: str, end_date: str) -> pd.DataFrame:
+    """
+    일간 VIX/SPY 데이터에서 월별 패닉 요약 통계 5개를 추출합니다.
+    
+    Features:
+        DAILY_VIX_MAX:   월중 최대 VIX (패닉 스파이크 감지)
+        DAILY_VIX_SLOPE: VIX의 월중 OLS 기울기 (상승 추세 = 위험 증가)
+        DAILY_VIX_SPIKE: max(VIX) - mean(VIX) (정상 대비 이탈 강도)
+        DAILY_SPY_TAIL:  SPY 일간 수익률 < -2% 인 날의 비율
+        DAILY_SPY_MAXDD: SPY 월중 최대 일간 drawdown
+    
+    Parameters:
+        start_date: 시작일 (YYYY-MM-DD)
+        end_date: 종료일 (YYYY-MM-DD)
+        
+    Returns:
+        DataFrame (N_months, 5) — 월말 인덱스
+    """
+    import yfinance as yf
+    from scipy.stats import linregress
+    
+    print(f"[INFO] 일간 패닉 피처 생성 중...")
+    
+    # 1. 일간 VIX 다운로드
+    vix_daily = yf.download('^VIX', start=start_date, end=end_date,
+                             progress=False, auto_adjust=True)['Close']
+    if isinstance(vix_daily, pd.DataFrame):
+        vix_daily = vix_daily.squeeze()
+    if isinstance(vix_daily.index, pd.MultiIndex):
+        vix_daily.index = vix_daily.index.get_level_values(0)
+    vix_daily = vix_daily.dropna()
+    
+    # 2. 일간 SPY 수익률 다운로드
+    spy_daily = yf.download('SPY', start=start_date, end=end_date,
+                             progress=False, auto_adjust=True)['Close']
+    if isinstance(spy_daily, pd.DataFrame):
+        spy_daily = spy_daily.squeeze()
+    if isinstance(spy_daily.index, pd.MultiIndex):
+        spy_daily.index = spy_daily.index.get_level_values(0)
+    spy_ret = spy_daily.pct_change().dropna()
+    
+    # 3. 월별 그룹핑하여 5개 통계량 계산
+    # ⚠️ VIX와 SPY는 거래일이 다를 수 있으므로 공통 인덱스 기준으로 월 그룹핑
+    common_idx = vix_daily.index.intersection(spy_ret.index)
+    vix_aligned = vix_daily.loc[common_idx]
+    spy_aligned = spy_ret.loc[common_idx]
+    
+    monthly_groups = vix_aligned.groupby(pd.Grouper(freq='ME'))
+    
+    records = []
+    for month, vix_group in monthly_groups:
+        spy_group = spy_aligned.loc[spy_aligned.index.to_period('M') == month.to_period('M')]
+        
+        if len(vix_group) < 5 or len(spy_group) < 5:
+            continue
+        
+        # VIX 피처
+        vix_max = float(vix_group.max())
+        vix_mean = float(vix_group.mean())
+        vix_spike = vix_max - vix_mean
+        
+        # VIX slope: OLS 기울기 (일 기준)
+        x_days = np.arange(len(vix_group))
+        try:
+            slope = float(linregress(x_days, vix_group.values).slope)
+        except Exception:
+            slope = 0.0
+        
+        # SPY 피처
+        tail_ratio = float((spy_group < -0.02).sum()) / len(spy_group)
+        
+        # SPY 월중 max drawdown
+        cum = (1 + spy_group).cumprod()
+        running_max = cum.cummax()
+        drawdown = (cum - running_max) / running_max
+        max_dd = float(drawdown.min())
+        
+        records.append({
+            'date': month,
+            'DAILY_VIX_MAX': vix_max,
+            'DAILY_VIX_SLOPE': slope,
+            'DAILY_VIX_SPIKE': vix_spike,
+            'DAILY_SPY_TAIL': tail_ratio,
+            'DAILY_SPY_MAXDD': max_dd,
+        })
+    
+    result = pd.DataFrame(records).set_index('date')
+    print(f"[INFO] 일간 패닉 피처 생성 완료 ({len(result)}개월, 5개 컬럼)")
+    return result
+
+
+def compute_ea_midas_features(start_date: str, end_date: str) -> pd.DataFrame:
+    """
+    Extreme-Attention MIDAS — 일간 VIX/SPY의 velocity+acceleration에
+    softmax attention을 적용하여 월간 요약 피처를 생성합니다.
+    
+    기존 daily_panic_features (단순 통계량)와 달리, 월 내 '폭발적 변화'에
+    주의(attention)를 집중시켜 극단 이벤트를 더 날카롭게 포착합니다.
+    
+    Features (4개):
+        EA_VIX:            Attention-weighted VIX 월간 대표값
+        EA_SPY:            Attention-weighted SPY 수익률 월간 대표값
+        EA_VIX_ACCEL_MAX:  월중 VIX 가속도(2차 미분) 최대값
+        EA_SPY_VELOCITY_MIN: 월중 SPY 속도(1차 미분) 최소값 (최대 폭락 속도)
+    
+    Parameters:
+        start_date, end_date: 기간
+    
+    Returns:
+        DataFrame (N_months, 4) — 월말 인덱스
+    """
+    import yfinance as yf
+    
+    print(f"[INFO] EA-MIDAS 피처 생성 중...")
+    
+    # 1. 일간 데이터 다운로드
+    vix_daily = yf.download('^VIX', start=start_date, end=end_date,
+                             progress=False, auto_adjust=True)['Close']
+    if isinstance(vix_daily, pd.DataFrame):
+        vix_daily = vix_daily.squeeze()
+    if isinstance(vix_daily.index, pd.MultiIndex):
+        vix_daily.index = vix_daily.index.get_level_values(0)
+    vix_daily = vix_daily.dropna()
+    
+    spy_daily = yf.download('SPY', start=start_date, end=end_date,
+                             progress=False, auto_adjust=True)['Close']
+    if isinstance(spy_daily, pd.DataFrame):
+        spy_daily = spy_daily.squeeze()
+    if isinstance(spy_daily.index, pd.MultiIndex):
+        spy_daily.index = spy_daily.index.get_level_values(0)
+    spy_ret = spy_daily.pct_change().dropna()
+    
+    # 2. 공통 인덱스 정렬
+    common_idx = vix_daily.index.intersection(spy_ret.index)
+    vix_aligned = vix_daily.loc[common_idx]
+    spy_aligned = spy_ret.loc[common_idx]
+    
+    monthly_groups = vix_aligned.groupby(pd.Grouper(freq='ME'))
+    
+    records = []
+    for month, vix_group in monthly_groups:
+        spy_group = spy_aligned.loc[spy_aligned.index.to_period('M') == month.to_period('M')]
+        
+        if len(vix_group) < 5 or len(spy_group) < 5:
+            continue
+        
+        vix_vals = vix_group.values.astype(float)
+        spy_vals = spy_group.values.astype(float)
+        
+        # 3. Velocity (1차 미분) & Acceleration (2차 미분)
+        vix_velocity = np.diff(vix_vals)        # (K-1,)
+        vix_accel = np.diff(vix_velocity)        # (K-2,)
+        spy_velocity = np.diff(spy_vals)         # (K-1,)
+        
+        if len(vix_accel) < 2:
+            continue
+        
+        # 4. Attention score = |velocity| + |acceleration| (VIX 기준)
+        #    극단적 변화(폭등)에 높은 가중치를 부여
+        min_len = min(len(vix_velocity[1:]), len(vix_accel))
+        attn_input = np.abs(vix_velocity[1:min_len+1]) + np.abs(vix_accel[:min_len])
+        
+        # Softmax attention (temperature=1.0)
+        attn_input = attn_input - attn_input.max()  # numerical stability
+        attn_weights = np.exp(attn_input) / (np.exp(attn_input).sum() + 1e-10)
+        
+        # 5. Attention-weighted 대표값
+        vix_trimmed = vix_vals[2:2+min_len]
+        spy_trimmed = spy_vals[2:2+min_len] if len(spy_vals) > 2+min_len else spy_vals[-min_len:]
+        
+        ea_vix = float(np.dot(attn_weights, vix_trimmed))
+        ea_spy = float(np.dot(attn_weights, spy_trimmed[:len(attn_weights)]))
+        
+        # 6. 극단 통계
+        ea_vix_accel_max = float(np.max(vix_accel))
+        ea_spy_velocity_min = float(np.min(spy_velocity))
+        
+        records.append({
+            'date': month,
+            'EA_VIX': ea_vix,
+            'EA_SPY': ea_spy,
+            'EA_VIX_ACCEL_MAX': ea_vix_accel_max,
+            'EA_SPY_VELOCITY_MIN': ea_spy_velocity_min,
+        })
+    
+    result = pd.DataFrame(records).set_index('date')
+    print(f"[INFO] EA-MIDAS 피처 생성 완료 ({len(result)}개월, 4개 컬럼)")
+    return result
+
+
+
+def download_nfci(start_date: str, end_date: str) -> pd.Series:
+    """
+    FRED에서 NFCI (National Financial Conditions Index)를 다운로드합니다.
+    
+    NFCI는 시카고 연준이 발표하는 금융여건 지수:
+      - 0 근처 = 정상
+      - 양수 = 금융 긴축 (위기 신호)
+      - 음수 = 금융 완화
+    
+    주간 데이터를 월말 리샘플링하여 반환합니다.
+    FRED API가 없으면 yfinance 등 대체 수단으로 fallback합니다.
+    
+    Parameters:
+        start_date: 시작일 (YYYY-MM-DD)
+        end_date: 종료일 (YYYY-MM-DD)
+        
+    Returns:
+        pd.Series — 월말 인덱스, name='NFCI'
+    """
+    nfci = None
+    
+    # 방법 1: fredapi
+    if FRED_AVAILABLE and FRED_API_KEY:
+        try:
+            from fredapi import Fred
+            fred = Fred(api_key=FRED_API_KEY)
+            nfci_raw = fred.get_series('NFCI', observation_start=start_date,
+                                        observation_end=end_date)
+            nfci = nfci_raw.resample('ME').last().dropna()
+            print(f"[INFO] NFCI 다운로드 완료 (fredapi): {len(nfci)}개월")
+        except Exception as e:
+            print(f"[WARNING] fredapi NFCI 실패: {e}")
+    
+    # 방법 2: pandas_datareader
+    if nfci is None:
+        try:
+            import pandas_datareader.data as web
+            nfci_raw = web.DataReader('NFCI', 'fred', start_date, end_date)
+            nfci = nfci_raw['NFCI'].resample('ME').last().dropna()
+            print(f"[INFO] NFCI 다운로드 완료 (pandas_datareader): {len(nfci)}개월")
+        except Exception as e:
+            print(f"[WARNING] pandas_datareader NFCI 실패: {e}")
+    
+    # 방법 3: 실패 시 빈 시리즈 반환
+    if nfci is None:
+        print("[WARNING] NFCI 데이터 수집 실패. 피처를 건너뜁니다.")
+        print("[TIP] pip install fredapi && export FRED_API_KEY='your_key'")
+        return pd.Series(dtype=float, name='NFCI')
+    
+    nfci.name = 'NFCI'
+    return nfci
+
+
 def prepare_training_data(
     start_date: str = '2007-07-01',
     end_date: str = '2024-01-01',
@@ -321,7 +609,12 @@ def prepare_training_data(
     train_ratio: float = 0.8,
     use_midas: bool = False,
     use_momentum: bool = False,
+    use_correlation: bool = False,
     use_macro_regime: bool = False,
+    use_daily_panic: bool = False,
+    use_nfci: bool = False,
+    use_ea_midas: bool = False,
+    assets_13: bool = False,
     midas_K: int = 22,
     midas_poly_degree: int = 2,
     midas_window: int = 60,
@@ -347,8 +640,11 @@ def prepare_training_data(
         scaler: 정규화 스케일러
         asset_names: 자산 이름 리스트
     """
+    # 0. 자산 유니버스 설정 (13자산 모드 지원)
+    active_tickers = ASSETS_13 if assets_13 else ASSET_TICKERS
+    
     # 1. 자산 데이터 수집
-    _, asset_returns = get_monthly_asset_data(ASSET_TICKERS, start_date, end_date)
+    _, asset_returns = get_monthly_asset_data(active_tickers, start_date, end_date)
     
     # 2. VIX 데이터 수집
     vix_data = get_vix_data(start_date, end_date)
@@ -378,7 +674,7 @@ def prepare_training_data(
     if use_momentum:
         n_mom_added = 0
         mom_cols = []
-        for ticker in ASSET_TICKERS:
+        for ticker in active_tickers:
             if ticker in combined_data.columns:
                 mom_col = f'{ticker}_MOM12'
                 combined_data[mom_col] = (
@@ -405,6 +701,42 @@ def prepare_training_data(
             combined_data = pd.concat([combined_data, cs_rank, cs_zscore], axis=1)
             print(f"[INFO] Cross-Sectional Momentum 추가 완료 ({len(mom_cols)*2}개 컬럼: rank + zscore)")
 
+    # 6d. Rolling Correlation Features (Phase7 STEP2)
+    if use_correlation:
+        corr_df = compute_rolling_corr(asset_returns)
+        # 상관관계 데이터를 combined_data에 병합 (인덱스 기준)
+        combined_data = combined_data.join(corr_df, how='left')
+        # 결측치 처리: 롤링 윈도우 시작 전 구간은 0으로 채움
+        for col in corr_df.columns:
+            combined_data[col] = combined_data[col].fillna(0.0)
+        print(f"[INFO] Rolling Correlation Feature 추가 완료 ({len(corr_df.columns)}개 컬럼, window={CORR_WINDOW}개월)")
+
+    # 6e. Daily Panic Features (Phase7 STEP3)
+    if use_daily_panic:
+        panic_df = compute_daily_panic_features(start_date, end_date)
+        if not panic_df.empty:
+            combined_data = combined_data.join(panic_df, how='left')
+            for col in panic_df.columns:
+                combined_data[col] = combined_data[col].fillna(0.0)
+            print(f"[INFO] Daily Panic Feature 추가 완료 ({len(panic_df.columns)}개 컬럼)")
+
+    # 6f. NFCI (Phase7 STEP3)
+    if use_nfci:
+        nfci_series = download_nfci(start_date, end_date)
+        if not nfci_series.empty:
+            nfci_df = nfci_series.to_frame()
+            combined_data = combined_data.join(nfci_df, how='left')
+            combined_data['NFCI'] = combined_data['NFCI'].fillna(0.0)
+            print(f"[INFO] NFCI Feature 추가 완료 (1개 컬럼)")
+
+    # 6g. EA-MIDAS Features (Phase7 STEP3 고도화)
+    if use_ea_midas:
+        ea_df = compute_ea_midas_features(start_date, end_date)
+        if not ea_df.empty:
+            combined_data = combined_data.join(ea_df, how='left')
+            for col in ea_df.columns:
+                combined_data[col] = combined_data[col].fillna(0.0)
+            print(f"[INFO] EA-MIDAS Feature 추가 완료 ({len(ea_df.columns)}개 컬럼)")
 
     # 7. MIDAS Feature 병합 (use_midas=True인 경우)
     if use_midas:
@@ -453,7 +785,7 @@ def prepare_training_data(
     vix_array = np.array(vix_seq)
     
     # 12. 타겟에서 거시변수는 제외하고 자산 수익률만 남김
-    num_assets = len(ASSET_TICKERS)
+    num_assets = len(active_tickers)
     y_assets = y[:, :num_assets]
     
     # 13. PyTorch 텐서로 변환
@@ -485,7 +817,7 @@ def prepare_training_data(
     print(f"[INFO] y_tensor shape: {y_tensor.shape}")
     print(f"[INFO] vix_tensor shape: {vix_tensor.shape}")
     
-    return X_tensor, y_tensor, vix_tensor, scaler, ASSET_TICKERS, y_dates, macro_tensor
+    return X_tensor, y_tensor, vix_tensor, scaler, list(active_tickers), y_dates, macro_tensor
 
 
 # =============================================================================

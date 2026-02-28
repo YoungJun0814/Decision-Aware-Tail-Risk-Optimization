@@ -1,8 +1,5 @@
 {
   "version": "v4",
-  "dist_type": "normal",
-  "t_df": 5.0,
-  "use_correlation": false,
   "config": {
     "model_type": "gru",
     "hidden_dim": 32,
@@ -32,35 +29,32 @@
     "bull_leverage": 2.0,
     "crisis_leverage": 1.0,
     "use_momentum": true,
-    "use_correlation": false,
     "use_macro_regime": true,
     "macro_dim": 2,
     "start_date": "2007-07-01",
     "end_date": "2024-01-01",
     "n_seeds": 3,
-    "device": "cuda",
-    "dist_type": "normal",
-    "t_df": 5.0
+    "device": "cuda"
   },
   "n_folds": 4,
   "before_vt": {
-    "sharpe": 0.8179492607118416,
-    "annual_return": 0.0785257688032376,
-    "mdd": 0.12261614096891044
+    "sharpe": 0.783622425641478,
+    "annual_return": 0.07921657739799538,
+    "mdd": 0.12261068719835967
   },
   "after_vt": {
-    "sharpe": 0.8111810881549335,
-    "annual_return": 0.0837137837317321,
-    "mdd": 0.11087779326464918
+    "sharpe": 0.7902255584380488,
+    "annual_return": 0.08396204091605164,
+    "mdd": 0.1108303493026991
   },
   "ensemble": {
-    "sharpe": 0.8134938774418986,
-    "annual_return": 0.0838991207866184,
-    "mdd": 0.11087804290798488
+    "sharpe": 0.7850987342964686,
+    "annual_return": 0.08355666294596949,
+    "mdd": 0.11083061746887977
   },
   "baseline": {
-    "sharpe": 0.7588906843470549,
-    "annual_return": 0.0778814917254535,
-    "mdd": 0.14042771443092697
+    "sharpe": 0.7588905230070412,
+    "annual_return": 0.07788149726827878,
+    "mdd": 0.1404277269040064
   }
 }

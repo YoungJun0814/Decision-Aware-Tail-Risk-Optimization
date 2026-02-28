@@ -62,7 +62,15 @@ class RegimeHead(nn.Module):
                 self.regime_logits.bias.copy_(
                     torch.log(hmm_prior_mean.float() + 1e-8))
             else:
-                default_priors = torch.tensor([0.6, 0.3, 0.1])
+                # Dynamic default priors based on n_regimes
+                if n_regimes == 3:
+                    default_priors = torch.tensor([0.6, 0.3, 0.1])
+                elif n_regimes == 4:
+                    default_priors = torch.tensor([0.4, 0.3, 0.2, 0.1])
+                else:
+                    # Decreasing geometric priors for arbitrary n_regimes
+                    priors = torch.arange(n_regimes, 0, -1, dtype=torch.float32)
+                    default_priors = priors / priors.sum()
                 self.regime_logits.bias.copy_(torch.log(default_priors))
     
     def forward(self, hidden: torch.Tensor, macro_features: torch.Tensor = None,

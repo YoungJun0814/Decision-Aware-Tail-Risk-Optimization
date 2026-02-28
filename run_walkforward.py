@@ -31,6 +31,28 @@ from src.trainer import Trainer, TrajectoryBatchSampler
 from src.utils import set_seed, get_device, calculate_mdd
 
 
+import argparse
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Walk-Forward Validation Script")
+    parser.add_argument('--dist_type', type=str, default='t', choices=['normal', 't'],
+                        help="Distribution type for CVaR (normal or t)")
+    parser.add_argument('--t_df', type=float, default=5.0,
+                        help="Degrees of freedom for t-distribution")
+    parser.add_argument('--no_correlation', action='store_true',
+                        help="Disable rolling correlation features (Ablation study)")
+    parser.add_argument('--no_daily_panic', action='store_true',
+                        help="Disable daily panic features (Ablation study)")
+    parser.add_argument('--no_nfci', action='store_true',
+                        help="Disable NFCI feature (Ablation study)")
+    parser.add_argument('--e2e_regime', action='store_true',
+                        help="Enable End-to-End Regime learning (Gumbel-Softmax)")
+    parser.add_argument('--ea_midas', action='store_true',
+                        help="Enable EA-MIDAS attention features (velocity+acceleration)")
+    parser.add_argument('--assets_13', action='store_true',
+                        help="Expand asset universe 10 -> 13 (add TIPS, DBC, ACWX)")
+    return parser.parse_args()
+
 # =============================================================================
 # Configuration  
 # =============================================================================
@@ -73,6 +95,12 @@ CONFIG = {
     
     # Features
     'use_momentum': True,      # Phase2A: 12-month momentum features
+    'use_correlation': True,   # Phase7 STEP2: rolling correlation features
+    'use_daily_panic': True,   # Phase7 STEP3: daily VIX/SPY panic features
+    'use_nfci': True,          # Phase7 STEP3: NFCI financial conditions
+    'e2e_regime': False,       # Phase7 STEP4: End-to-End regime learning
+    'use_ea_midas': False,     # Phase7: EA-MIDAS attention features
+    'assets_13': False,        # Phase7: 13-asset universe (TIPS, DBC, ACWX)
     'use_macro_regime': True,  # Phase5: macro → RegimeHead
     'macro_dim': 2,            # T10Y3M + BAA10Y
     
@@ -194,7 +222,7 @@ def train_fold(X, y, y_raw, vix, regime_probs, fold, config, seed,
     
     # Model — GRU + CVaR (v1 base) with regime_dim (v4) + macro_dim (v5)
     input_dim = X.shape[-1]
-    num_assets = len(ASSET_TICKERS)
+    num_assets = y.shape[-1]  # 동적: 10 (기본) or 13 (--assets_13)
     
     macro_dim = config.get('macro_dim', 0) if macro_tensor is not None else 0
     
@@ -210,6 +238,9 @@ def train_fold(X, y, y_raw, vix, regime_probs, fold, config, seed,
         regime_dim=config['regime_dim'],
         macro_dim=macro_dim,
         max_bil_floor=config.get('max_bil_floor', 0.5),
+        dist_type=config.get('dist_type', 't'),
+        t_df=config.get('t_df', 5.0),
+        e2e_regime=config.get('e2e_regime', False),
     )
     
     # Loss — DecisionAwareLoss (v1) with regime-conditional λ_dd (v4)
@@ -254,6 +285,19 @@ def train_fold(X, y, y_raw, vix, regime_probs, fold, config, seed,
         X_test.to(device),
         **predict_kwargs,
     ).cpu().numpy()
+    
+    # --- 비중 진단 (13자산 모드 디버깅) ---
+    w_sum = weights.sum(axis=1)
+    if np.abs(w_sum - 1.0).max() > 0.01:
+        print(f"  [WARNING] Weight sum deviation: mean={w_sum.mean():.4f}, "
+              f"max_dev={np.abs(w_sum - 1.0).max():.4f}")
+        # 강제 정규화: sum(w) != 1 이면 보정
+        weights = weights / w_sum[:, np.newaxis]
+    
+    if weights.min() < -0.01:
+        print(f"  [WARNING] Negative weights detected: min={weights.min():.4f}")
+        weights = np.maximum(weights, 0.0)
+        weights = weights / weights.sum(axis=1, keepdims=True)
     
     return weights, history
 
@@ -422,9 +466,34 @@ def evaluate_portfolio(weights, returns, label=""):
 # =============================================================================
 
 def main():
+    args = parse_args()
+    
+    # Update CONFIG based on args
+    if hasattr(args, 'no_correlation') and args.no_correlation:
+        CONFIG['use_correlation'] = False
+    if hasattr(args, 'no_daily_panic') and args.no_daily_panic:
+        CONFIG['use_daily_panic'] = False
+    if hasattr(args, 'no_nfci') and args.no_nfci:
+        CONFIG['use_nfci'] = False
+    if hasattr(args, 'e2e_regime') and args.e2e_regime:
+        CONFIG['e2e_regime'] = True
+    if hasattr(args, 'ea_midas') and args.ea_midas:
+        CONFIG['use_ea_midas'] = True
+    if hasattr(args, 'assets_13') and args.assets_13:
+        CONFIG['assets_13'] = True
+    CONFIG['dist_type'] = args.dist_type
+    CONFIG['t_df'] = args.t_df
+        
     print("=" * 70)
     print("  v4 Walk-Forward: Regime-Conditional CVaR")
     print("  GRU + CVaR + Regime Q-Concat + Crisis Overlay")
+    print(f"  Distribution:  {args.dist_type.upper()} {f'(df={args.t_df})' if args.dist_type == 't' else ''}")
+    print(f"  Correlation:   {'OFF' if args.no_correlation else 'ON'}")
+    print(f"  Daily Panic:   {'OFF' if args.no_daily_panic else 'ON'}")
+    print(f"  NFCI:          {'OFF' if args.no_nfci else 'ON'}")
+    print(f"  E2E Regime:    {'ON' if args.e2e_regime else 'OFF'}")
+    print(f"  EA-MIDAS:      {'ON' if CONFIG['use_ea_midas'] else 'OFF'}")
+    print(f"  Assets:        {'13' if CONFIG['assets_13'] else '10'}")
     print("=" * 70)
     
     # --- Config summary ---
@@ -440,7 +509,10 @@ def main():
     # --- Data Loading ---
     print("\n[Step 1] Loading Data...")
     
-    _, asset_returns_df = get_monthly_asset_data(ASSET_TICKERS, 
+    from src.data_loader import ASSETS_13
+    active_tickers = ASSETS_13 if CONFIG.get('assets_13', False) else ASSET_TICKERS
+    
+    _, asset_returns_df = get_monthly_asset_data(active_tickers, 
                                                   CONFIG['start_date'], CONFIG['end_date'])
     
     X, y, vix, scaler, asset_names, y_dates, macro_tensor = prepare_training_data(
@@ -449,7 +521,12 @@ def main():
         seq_length=CONFIG['seq_length'],
         normalize=True,
         use_momentum=CONFIG.get('use_momentum', False),
+        use_correlation=CONFIG.get('use_correlation', False),
         use_macro_regime=CONFIG.get('use_macro_regime', False),
+        use_daily_panic=CONFIG.get('use_daily_panic', False),
+        use_nfci=CONFIG.get('use_nfci', False),
+        use_ea_midas=CONFIG.get('use_ea_midas', False),
+        assets_13=CONFIG.get('assets_13', False),
     )
     
     y_raw = asset_returns_df.reindex(y_dates).values
@@ -457,6 +534,25 @@ def main():
     if nan_mask.any():
         print(f"  [WARNING] {nan_mask.sum()} NaN rows in y_raw, filling with 0.0")
         y_raw = np.nan_to_num(y_raw, nan=0.0)
+    
+    # --- y_raw 진단 (13자산 수익률 검증) ---
+    print(f"\n  [DIAG] y_raw shape: {y_raw.shape}")
+    print(f"  [DIAG] asset_returns_df columns: {list(asset_returns_df.columns)}")
+    print(f"  [DIAG] asset_names from prepare: {asset_names}")
+    for i, col in enumerate(asset_returns_df.columns):
+        col_data = y_raw[:, i]
+        print(f"  [DIAG] {col:>6s}: mean={col_data.mean():.5f}, std={col_data.std():.5f}, "
+              f"min={col_data.min():.5f}, max={col_data.max():.5f}")
+    # 이상 감지: 월 평균 수익률 > 5%면 데이터 오류
+    mean_monthly = np.abs(y_raw).mean()
+    if mean_monthly > 0.05:
+        print(f"\n  [CRITICAL] y_raw 월평균 |수익률| = {mean_monthly:.4f} — 비정상적으로 높음!")
+        print(f"  [CRITICAL] asset_returns_df.index[:5] = {list(asset_returns_df.index[:5])}")
+        print(f"  [CRITICAL] y_dates[:5] = {list(y_dates[:5])}")
+        # 날짜 형식 비교
+        if len(asset_returns_df.index) > 0 and len(y_dates) > 0:
+            print(f"  [CRITICAL] type(asset_returns_df.index[0]) = {type(asset_returns_df.index[0])}")
+            print(f"  [CRITICAL] type(y_dates[0]) = {type(y_dates[0])}")
     
     n_samples = min(len(X), len(y_raw))
     X = X[:n_samples]
@@ -598,7 +694,7 @@ def main():
     print("  1/N Baseline (전체 OOS)")
     print(f"{'='*50}")
     
-    num_assets = len(ASSET_TICKERS)
+    num_assets = all_test_returns.shape[1]  # 동적: 10 or 13
     equal_w = np.ones((len(all_test_returns), num_assets)) / num_assets
     baseline_metrics = evaluate_portfolio(equal_w, all_test_returns, "1/N Equal Weight")
     
@@ -621,10 +717,32 @@ def main():
         bl = baseline_metrics[metric]
         print(f"  {metric:<20s} {bm:{fmt}} ± {bs:{fmt}}   {am:{fmt}} ± {as_:{fmt}}   {em:{fmt}}   {bl:{fmt}}")
     
-    # --- Save ---
+    # --- Save OOS monthly returns as CSV (for run_compare.py) ---
+    all_test_dates = np.concatenate([dates[f['test_idx']] for f in folds])
+    if CONFIG['vol_targeting']:
+        final_weights = adj_ensemble
+    else:
+        final_weights = ensemble_weights
+    port_ret_series = (final_weights * all_test_returns).sum(axis=1)
+    port_ret_df = pd.DataFrame(
+        {'return': port_ret_series}, 
+        index=pd.DatetimeIndex(all_test_dates, name='date')
+    )
     os.makedirs('results/walkforward', exist_ok=True)
+    port_ret_df.to_csv('results/walkforward/v4_port_returns.csv')
+    print(f"\n  OOS returns saved to results/walkforward/v4_port_returns.csv ({len(port_ret_df)} months)")
+    
+    # --- Save ---
     summary = {
         'version': 'v4',
+        'dist_type': args.dist_type,
+        't_df': args.t_df,
+        'use_correlation': CONFIG['use_correlation'],
+        'use_daily_panic': CONFIG.get('use_daily_panic', False),
+        'use_nfci': CONFIG.get('use_nfci', False),
+        'e2e_regime': CONFIG.get('e2e_regime', False),
+        'use_ea_midas': CONFIG.get('use_ea_midas', False),
+        'assets_13': CONFIG.get('assets_13', False),
         'config': {k: str(v) if not isinstance(v, (int, float, bool, str)) else v 
                    for k, v in CONFIG.items()},
         'n_folds': len(folds),

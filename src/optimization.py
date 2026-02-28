@@ -10,6 +10,7 @@ Optimization Module
 import torch
 import torch.nn as nn
 import numpy as np
+from torch.distributions import StudentT
 
 # cvxpy 관련 import
 try:
@@ -45,7 +46,9 @@ class CVaROptimizationLayer(nn.Module):
         num_scenarios: int = 200, 
         confidence_level: float = 0.95,
         bil_index: int = 4,
-        safety_threshold: float = 0.5
+        safety_threshold: float = 0.5,
+        dist_type: str = 't',
+        t_df: int = 5,
     ):
         super(CVaROptimizationLayer, self).__init__()
         self.num_assets = num_assets
@@ -53,11 +56,26 @@ class CVaROptimizationLayer(nn.Module):
         self.beta = confidence_level
         self.bil_index = bil_index
         self.safety_threshold = safety_threshold
+        self.dist_type = dist_type
+        self.t_df = t_df
         
         self.cvxpy_layer = None
         
         if CVXPY_AVAILABLE:
             self._build_cvar_layer()
+            print(f"[INFO] CVaR Layer initialized: {num_assets} assets, {num_scenarios} scenarios, dist={dist_type}(df={t_df})")
+
+    def _sample_noise(self, shape, device):
+        """시나리오 노이즈 샘플링: Normal 또는 Student-T."""
+        if self.dist_type == 't':
+            t_dist = StudentT(df=self.t_df)
+            eps = t_dist.sample(shape).to(device)
+            # t(df)의 분산 = df/(df-2) → 정규화하여 단위 분산 유지
+            if self.t_df > 2:
+                eps = eps / (self.t_df / (self.t_df - 2)) ** 0.5
+        else:
+            eps = torch.randn(*shape, device=device)
+        return eps
             
     def _build_cvar_layer(self):
         """
@@ -143,7 +161,7 @@ class CVaROptimizationLayer(nn.Module):
             # PSD가 아닐 경우 대각 행렬 근사 사용
             L = torch.diag_embed(torch.sqrt(torch.diagonal(sigma, dim1=1, dim2=2).abs() + 1e-6))
             
-        eps = torch.randn(batch_size, self.num_scenarios, self.num_assets, device=device) # (B, S, N)
+        eps = self._sample_noise((batch_size, self.num_scenarios, self.num_assets), device)  # (B, S, N)
         
         mu_expanded = mu.unsqueeze(1)
         
@@ -166,8 +184,20 @@ class CVaROptimizationLayer(nn.Module):
             # cvxpylayers 호출
             weights, = self.cvxpy_layer(scenarios, crisis_param)
         except Exception as e:
-            # 최적화 실패 시 Softmax로 대체 (그래디언트 단절 방지)
-            weights = torch.softmax(mu, dim=1) 
+            # 최적화 실패 시 안전한 폴백: tempered softmax + equal-weight 블렌드
+            if not hasattr(self, '_fallback_count'):
+                self._fallback_count = 0
+            self._fallback_count += 1
+            if self._fallback_count <= 3:  # 처음 3번만 로그
+                print(f"  [CVaR FALLBACK #{self._fallback_count}] Solver failed, using safe blend")
+            
+            equal_w = torch.ones_like(mu) / mu.size(1)
+            soft_w = torch.softmax(mu / 0.1, dim=1)  # temperature=0.1으로 평탄화
+            weights = 0.5 * equal_w + 0.5 * soft_w
+        
+        # 비중 안전 장치: 음수 방지 + sum=1 보장
+        weights = torch.clamp(weights, min=0.0)
+        weights = weights / (weights.sum(dim=1, keepdim=True) + 1e-8)
             
         return weights
 
@@ -239,6 +269,8 @@ class MeanCVaROptimizationLayer(nn.Module):
         confidence_level: float = 0.95,
         bil_index: int = 4,
         safety_threshold: float = 0.5,
+        dist_type: str = 't',
+        t_df: int = 5,
     ):
         super().__init__()
         self.num_assets = num_assets
@@ -246,12 +278,28 @@ class MeanCVaROptimizationLayer(nn.Module):
         self.beta = confidence_level
         self.bil_index = bil_index
         self.safety_threshold = safety_threshold
+        self.dist_type = dist_type
+        self.t_df = t_df
         
         self.cvxpy_layer = None
         
         if CVXPY_AVAILABLE:
             self._build_mean_cvar_layer()
     
+    def _sample_noise(self, shape, device):
+        """시나리오 노이즈 샘플링: Normal 또는 Student-T."""
+        if self.dist_type == 't':
+            t_dist = StudentT(df=self.t_df)
+            eps = t_dist.sample(shape).to(device)
+            # t(df)의 분산 = df/(df-2) → 정규화하여 단위 분산 유지
+            if self.t_df > 2:
+                eps = eps / (self.t_df / (self.t_df - 2)) ** 0.5
+            else: # For df <= 2, variance is undefined or infinite. Use as is or handle differently.
+                pass
+        else: # Default to normal distribution
+            eps = torch.randn(*shape, device=device)
+        return eps
+
     def _build_mean_cvar_layer(self):
         """
         순수 CVaR 최소화 CvxpyLayer 구축.
@@ -338,7 +386,7 @@ class MeanCVaROptimizationLayer(nn.Module):
             L = torch.diag_embed(
                 torch.sqrt(torch.diagonal(sigma, dim1=1, dim2=2).abs() + 1e-6))
         
-        eps = torch.randn(batch_size, self.num_scenarios, self.num_assets, device=device)
+        eps = self._sample_noise((batch_size, self.num_scenarios, self.num_assets), device)
         scenarios = mu.unsqueeze(1) + torch.bmm(eps, L.transpose(1, 2))  # (B, S, N)
         
         # 2. 시나리오 사전 조정: R_adj = R + (1/λ)·μ
@@ -356,7 +404,20 @@ class MeanCVaROptimizationLayer(nn.Module):
         try:
             weights, = self.cvxpy_layer(adjusted_scenarios, crisis_param)
         except Exception:
-            weights = torch.softmax(mu, dim=1)
+            # 안전한 폴백: tempered softmax + equal-weight 블렌드
+            if not hasattr(self, '_fallback_count'):
+                self._fallback_count = 0
+            self._fallback_count += 1
+            if self._fallback_count <= 3:
+                print(f"  [MeanCVaR FALLBACK #{self._fallback_count}] Solver failed, using safe blend")
+            
+            equal_w = torch.ones_like(mu) / mu.size(1)
+            soft_w = torch.softmax(mu / 0.1, dim=1)
+            weights = 0.5 * equal_w + 0.5 * soft_w
+        
+        # 비중 안전 장치
+        weights = torch.clamp(weights, min=0.0)
+        weights = weights / (weights.sum(dim=1, keepdim=True) + 1e-8)
         
         return weights
 
