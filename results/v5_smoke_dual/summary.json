@@ -1,0 +1,110 @@
+{
+  "version": "v5",
+  "dist_type": "t",
+  "t_df": 5.0,
+  "config": {
+    "model_type": "dual_shock_expert",
+    "hidden_dim": 32,
+    "omega_mode": "learnable",
+    "sigma_mode": "prior",
+    "lambda_risk": 2.0,
+    "regime_dim": 4,
+    "max_bil_floor": 0.7,
+    "batch_size": 32,
+    "learning_rate": 0.001,
+    "weight_decay": 0.0001,
+    "epochs": 1,
+    "early_stopping_patience": 1,
+    "seq_length": 12,
+    "eta": 1.0,
+    "kappa_base": 0.001,
+    "kappa_vix_scale": 0.0001,
+    "lambda_dd": 2.0,
+    "regime_dd_scale": 3.0,
+    "realized_cost_bps": 10.0,
+    "use_path_mdd": false,
+    "path_mdd_grad_scale": 0.15,
+    "vol_targeting": true,
+    "target_vol": 0.1,
+    "vol_lookback": 3,
+    "max_leverage": 1.5,
+    "dd_threshold_1": 0.03,
+    "dd_threshold_2": 0.05,
+    "dd_recovery_months": 2,
+    "bull_leverage": 2.0,
+    "crisis_leverage": 1.0,
+    "use_momentum": true,
+    "use_correlation": true,
+    "use_daily_panic": true,
+    "use_nfci": true,
+    "e2e_regime": false,
+    "use_ea_midas": false,
+    "assets_13": false,
+    "use_macro_regime": true,
+    "macro_dim": 2,
+    "start_date": "2007-07-01",
+    "end_date": "2018-01-01",
+    "n_seeds": 1,
+    "oos_start": "2016-07-31",
+    "test_window_months": 6,
+    "train_verbose": false,
+    "output_dir": "results\\v5_smoke_dual",
+    "device": "cuda",
+    "dist_type": "t",
+    "t_df": 5.0
+  },
+  "n_folds": 3,
+  "before_vt": {
+    "sharpe": 1.8493294033449037,
+    "annual_return": 0.09285203186400819,
+    "mdd": -0.036908677730177114
+  },
+  "after_vt": {
+    "sharpe": 1.793345385628884,
+    "annual_return": 0.08933128895831303,
+    "mdd": -0.03690867440171705
+  },
+  "ensemble": {
+    "sharpe": 1.793345385628884,
+    "annual_return": 0.08933128895831303,
+    "mdd": -0.03690867440171705,
+    "triple": false
+  },
+  "baseline": {
+    "sharpe": 1.446678468429389,
+    "annual_return": 0.06387715807408983,
+    "mdd": -0.04788361201407944
+  },
+  "fold_results": [
+    {
+      "fold": 1,
+      "test_start": "2016-07-31",
+      "test_end": "2016-12-31",
+      "n_months": 6,
+      "sharpe": 0.37889861845465705,
+      "annual_return": 0.0218103370773284,
+      "mdd": -0.03690867440171705,
+      "triple": false
+    },
+    {
+      "fold": 2,
+      "test_start": "2017-01-31",
+      "test_end": "2017-06-30",
+      "n_months": 6,
+      "sharpe": 2.4617432146819613,
+      "annual_return": 0.09711721074829588,
+      "mdd": -0.007175910551239591,
+      "triple": false
+    },
+    {
+      "fold": 3,
+      "test_start": "2017-07-31",
+      "test_end": "2017-12-31",
+      "n_months": 6,
+      "sharpe": 3.427233931372826,
+      "annual_return": 0.1490663190493148,
+      "mdd": -0.00898907204214829,
+      "triple": true
+    }
+  ]
+}

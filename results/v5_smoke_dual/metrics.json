@@ -1,0 +1,18 @@
+{
+  "sharpe": 1.793345385628884,
+  "return": 0.08933128895831303,
+  "mdd": -0.03690867440171705,
+  "triple": false,
+  "thresholds": {
+    "sharpe_min": 1.0,
+    "return_min": 0.1,
+    "mdd_min": -0.1
+  },
+  "experiment": {
+    "model_type": "dual_shock_expert",
+    "realized_cost_bps": 10.0,
+    "use_path_mdd": false,
+    "oos_start": "2016-07-31",
+    "oos_end": "2025-12-31"
+  }
+}
