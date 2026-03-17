@@ -26,7 +26,7 @@ from src.data_loader import (
     get_regime_4state, ASSET_TICKERS,
 )
 from src.models import get_model
-from src.loss import DecisionAwareLoss
+from src.loss import DecisionAwareLoss, PathAwareMDDLoss, SharpeLoss
 from src.trainer import Trainer, TrajectoryBatchSampler
 from src.utils import set_seed, get_device, calculate_mdd
 
@@ -35,6 +35,8 @@ import argparse
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Walk-Forward Validation Script")
+    parser.add_argument('--model_type', type=str, default='gru',
+                        help="Model type to run (e.g. gru, dual_shock_expert)")
     parser.add_argument('--dist_type', type=str, default='t', choices=['normal', 't'],
                         help="Distribution type for CVaR (normal or t)")
     parser.add_argument('--t_df', type=float, default=5.0,
@@ -51,6 +53,46 @@ def parse_args():
                         help="Enable EA-MIDAS attention features (velocity+acceleration)")
     parser.add_argument('--assets_13', action='store_true',
                         help="Expand asset universe 10 -> 13 (add TIPS, DBC, ACWX)")
+    parser.add_argument('--start-date', type=str, default='2007-07-01',
+                        help="Training data start date (inclusive, YYYY-MM-DD).")
+    parser.add_argument('--end-date', type=str, default='2026-01-01',
+                        help="Training data end date (exclusive, YYYY-MM-DD). Use 2026-01-01 to include Dec 2025.")
+    parser.add_argument('--oos-start', type=str, default='2016-07-31',
+                        help="Walk-forward OOS start date (YYYY-MM-DD).")
+    parser.add_argument('--test-window-months', type=int, default=24,
+                        help="Walk-forward test window length in months.")
+    parser.add_argument('--n-seeds', type=int, default=3,
+                        help="Number of random seeds for ensemble averaging.")
+    parser.add_argument('--epochs', type=int, default=100,
+                        help="Training epochs per fold.")
+    parser.add_argument('--early-stopping-patience', type=int, default=15,
+                        help="Early stopping patience per fold.")
+    parser.add_argument('--lambda-dd', type=float, default=2.0,
+                        help="Base drawdown penalty weight.")
+    parser.add_argument('--lambda-risk', type=float, default=None,
+                        help="BL-CVaR risk aversion (default: from CONFIG). "
+                             "Lower → more aggressive (return↑, MDD↓).")
+    parser.add_argument('--max-bil-floor', type=float, default=None,
+                        help="Crisis Overlay max BIL allocation (default: from CONFIG). "
+                             "Lower → less forced cash → higher return.")
+    parser.add_argument('--realized-cost-bps', type=float, default=0.0,
+                        help="Realized trading cost charged directly in the loss (bps).")
+    parser.add_argument('--use-path-mdd', action='store_true',
+                        help="Enable PathAwareMDDLoss-driven adaptive lambda_dd updates.")
+    parser.add_argument('--train-verbose', action='store_true',
+                        help="Print epoch-level training logs.")
+    parser.add_argument('--output-dir', type=str, default='results/walkforward',
+                        help="Directory to save metrics, fold results, and OOS artifacts.")
+    parser.add_argument('--exp', type=str, default='baseline',
+                        choices=['baseline', 'x1', 'x2', 'x3', 'x4', 'x5', 'x6'],
+                        help=(
+                            "Experiment preset. "
+                            "baseline: original DecisionAwareLoss. "
+                            "x1-x3: v6a round. "
+                            "x4: GRU+SharpeLoss+lambda_risk=1.0+bil_floor=0.3+very loose overlay. "
+                            "x5: DualShock+same. "
+                            "x6: GRU+SharpeLoss+lambda_risk=0.5+no overlay (raw output)."
+                        ))
     return parser.parse_args()
 
 # =============================================================================
@@ -76,11 +118,17 @@ CONFIG = {
     'seq_length': 12,
     
     # Loss
+    'loss_type': 'decision_aware',    # 'decision_aware' | 'sharpe'  — --exp로 덮어씀
     'eta': 1.0,
     'kappa_base': 0.001,
     'kappa_vix_scale': 0.0001,
     'lambda_dd': 2.0,
     'regime_dd_scale': 3.0,
+    'realized_cost_bps': 0.0,
+    'use_path_mdd': False,
+    'path_mdd_grad_scale': 0.15,
+    'return_target_monthly': 0.0,     # SharpeLoss 月 수익 하한 (0 = 비활성, 0.0083 ≈ 연10%)
+    'return_hinge_weight': 2.0,       # 미달 패널티 강도
     
     # Vol Targeting + Drawdown Control (Phase1R + Phase2B)
     'vol_targeting': True,
@@ -106,8 +154,12 @@ CONFIG = {
     
     # Walk-Forward
     'start_date': '2007-07-01',
-    'end_date': '2024-01-01',
+    'end_date': '2026-01-01',
     'n_seeds': 3,
+    'oos_start': '2016-07-31',
+    'test_window_months': 24,
+    'train_verbose': False,
+    'output_dir': 'results/walkforward',
     
     'device': get_device(),
 }
@@ -117,34 +169,36 @@ CONFIG = {
 # Walk-Forward Folds
 # =============================================================================
 
-def define_folds(dates, seq_length=12):
-    """Expanding Window Walk-Forward Fold 정의."""
-    fold_boundaries = [
-        ('2016-07-01', '2018-07-01'),
-        ('2018-07-01', '2020-07-01'),
-        ('2020-07-01', '2022-07-01'),
-        ('2022-07-01', '2025-01-01'),
-    ]
-    
+def define_folds_dynamic(dates, seq_length=12, oos_start='2016-07-31', test_window_months=24):
+    """Expanding-window walk-forward folds with configurable OOS start and test span."""
+    if test_window_months <= 0:
+        raise ValueError(f"test_window_months must be positive, got {test_window_months}")
+
+    dates_idx = pd.DatetimeIndex(pd.to_datetime(dates))
+    last_date = dates_idx.max()
+    current_start = pd.Timestamp(oos_start)
+
     folds = []
-    for test_start, test_end in fold_boundaries:
-        ts = pd.Timestamp(test_start)
-        te = pd.Timestamp(test_end)
-        
-        train_mask = dates < ts
-        test_mask = (dates >= ts) & (dates < te)
-        
+    while current_start <= last_date:
+        ts = current_start
+        te = current_start + pd.DateOffset(months=test_window_months)
+
+        train_mask = dates_idx < ts
+        test_mask = (dates_idx >= ts) & (dates_idx < te)
+
         train_idx = np.where(train_mask)[0]
         test_idx = np.where(test_mask)[0]
-        
+
         if len(train_idx) > seq_length and len(test_idx) > 0:
             folds.append({
                 'train_idx': train_idx,
                 'test_idx': test_idx,
-                'test_start': ts,
-                'test_end': te,
+                'test_start': pd.Timestamp(dates_idx[test_idx[0]]),
+                'test_end': pd.Timestamp(dates_idx[test_idx[-1]]),
             })
-    
+
+        current_start = te
+
     return folds
 
 
@@ -243,14 +297,33 @@ def train_fold(X, y, y_raw, vix, regime_probs, fold, config, seed,
         e2e_regime=config.get('e2e_regime', False),
     )
     
-    # Loss — DecisionAwareLoss (v1) with regime-conditional λ_dd (v4)
-    loss_fn = DecisionAwareLoss(
-        eta=config['eta'],
-        kappa_base=config['kappa_base'],
-        kappa_vix_scale=config['kappa_vix_scale'],
-        lambda_dd=config['lambda_dd'],
-        regime_dd_scale=config['regime_dd_scale'],
-    )
+    # Loss — SharpeLoss (x1/x3) or DecisionAwareLoss (baseline/x2)
+    if config.get('loss_type', 'decision_aware') == 'sharpe':
+        loss_fn = SharpeLoss(
+            lambda_dd=config['lambda_dd'],
+            kappa_base=config['kappa_base'],
+            kappa_vix_scale=config['kappa_vix_scale'],
+            regime_dd_scale=config['regime_dd_scale'],
+            return_target_monthly=config.get('return_target_monthly', 0.0),
+            return_hinge_weight=config.get('return_hinge_weight', 2.0),
+        )
+    else:
+        loss_fn = DecisionAwareLoss(
+            eta=config['eta'],
+            kappa_base=config['kappa_base'],
+            kappa_vix_scale=config['kappa_vix_scale'],
+            lambda_dd=config['lambda_dd'],
+            regime_dd_scale=config['regime_dd_scale'],
+            realized_cost_bps=config.get('realized_cost_bps', 0.0),
+        )
+
+    path_mdd_fn = None
+    if config.get('use_path_mdd', False):
+        path_mdd_fn = PathAwareMDDLoss(
+            mdd_target=-0.10,
+            mdd_lambda=5.0,
+            soft_margin=0.02,
+        )
     
     # Optimizer — v4: weight_decay 추가
     optimizer = optim.Adam(
@@ -265,13 +338,16 @@ def train_fold(X, y, y_raw, vix, regime_probs, fold, config, seed,
     
     trainer = Trainer(
         model=model, loss_fn=loss_fn,
-        optimizer=optimizer, device=device)
+        optimizer=optimizer, device=device,
+        path_mdd_loss_fn=path_mdd_fn,
+        path_mdd_grad_scale=config.get('path_mdd_grad_scale', 0.15),
+    )
     
     # Train with scheduler
     history = trainer.fit(
         train_loader, val_loader,
         epochs=config['epochs'],
-        verbose=False,
+        verbose=config.get('train_verbose', False) or config.get('use_path_mdd', False),
         early_stopping_patience=config['early_stopping_patience'],
         scheduler=scheduler,
     )
@@ -440,7 +516,7 @@ def evaluate_portfolio(weights, returns, label=""):
     mean_ret = port_ret.mean() * 12
     std_ret = port_ret.std() * np.sqrt(12)
     sharpe = mean_ret / std_ret if std_ret > 1e-8 else 0.0
-    mdd = calculate_mdd(port_ret)
+    mdd = -calculate_mdd(port_ret)
     
     result = {
         'sharpe': sharpe,
@@ -461,6 +537,15 @@ def evaluate_portfolio(weights, returns, label=""):
     return result
 
 
+def is_triple(metrics):
+    """Triple target check: Sharpe >= 1.0, Return >= 10%, MDD >= -10%."""
+    return (
+        metrics['sharpe'] >= 1.0
+        and metrics['annual_return'] >= 0.10
+        and metrics['mdd'] >= -0.10
+    )
+
+
 # =============================================================================
 # Main
 # =============================================================================
@@ -469,6 +554,7 @@ def main():
     args = parse_args()
     
     # Update CONFIG based on args
+    CONFIG['model_type'] = args.model_type
     if hasattr(args, 'no_correlation') and args.no_correlation:
         CONFIG['use_correlation'] = False
     if hasattr(args, 'no_daily_panic') and args.no_daily_panic:
@@ -483,10 +569,136 @@ def main():
         CONFIG['assets_13'] = True
     CONFIG['dist_type'] = args.dist_type
     CONFIG['t_df'] = args.t_df
-        
+    CONFIG['start_date'] = args.start_date
+    CONFIG['end_date'] = args.end_date
+    CONFIG['oos_start'] = args.oos_start
+    CONFIG['test_window_months'] = args.test_window_months
+    CONFIG['n_seeds'] = args.n_seeds
+    CONFIG['epochs'] = args.epochs
+    CONFIG['early_stopping_patience'] = args.early_stopping_patience
+    CONFIG['lambda_dd'] = args.lambda_dd
+    if args.lambda_risk is not None:
+        CONFIG['lambda_risk'] = args.lambda_risk
+    if args.max_bil_floor is not None:
+        CONFIG['max_bil_floor'] = args.max_bil_floor
+    CONFIG['realized_cost_bps'] = args.realized_cost_bps
+    CONFIG['use_path_mdd'] = args.use_path_mdd
+    CONFIG['train_verbose'] = args.train_verbose
+    CONFIG['output_dir'] = args.output_dir
+
+    # -------------------------------------------------------------------------
+    # Experiment Presets (--exp)
+    # args 기반 CONFIG를 덮어씀 — 순서 중요: 이 블록은 항상 args 매핑 후에 위치
+    # -------------------------------------------------------------------------
+    _exp = getattr(args, 'exp', 'baseline')
+
+    # 공통 "Loose Overlay" 설정 (x1/x2/x3 공유)
+    _LOOSE_OVERLAY = dict(
+        target_vol=0.13,         # 0.10 → 0.13: equity 50~65% 허용
+        max_leverage=1.8,        # 1.5  → 1.8
+        dd_threshold_1=0.05,     # 0.03 → 0.05: 빈번한 de-leverage 방지
+        dd_threshold_2=0.08,     # 0.05 → 0.08
+        use_path_mdd=False,      # Adaptive λ_dd 즉시포화 버그 방지
+    )
+
+    if _exp == 'x1':
+        # X1: SharpeLoss (Sharpe 직접 최대화) + Return Hinge + Loose Overlay
+        CONFIG.update(_LOOSE_OVERLAY)
+        CONFIG['loss_type'] = 'sharpe'
+        CONFIG['lambda_dd'] = 0.3           # MDD 이미 -7.4%로 여유 있으므로 완화
+        CONFIG['regime_dd_scale'] = 2.0
+        CONFIG['return_target_monthly'] = 0.0083   # 연 10% ≈ 월 0.83%
+        CONFIG['return_hinge_weight'] = 2.0
+        if CONFIG['output_dir'] == 'results/walkforward':
+            CONFIG['output_dir'] = 'results/exp_x1'
+
+    elif _exp == 'x2':
+        # X2: DecisionAwareLoss(eta=0.3, λ_dd=0.3) + Loose Overlay
+        # Risk/DD 패널티를 대폭 낮춰 Return term이 실질적으로 작동하도록 함
+        CONFIG.update(_LOOSE_OVERLAY)
+        CONFIG['loss_type'] = 'decision_aware'
+        CONFIG['eta'] = 0.3                # 1.0 → 0.3
+        CONFIG['lambda_dd'] = 0.3          # 2.0 → 0.3
+        CONFIG['regime_dd_scale'] = 2.0    # 3.0 → 2.0
+        if CONFIG['output_dir'] == 'results/walkforward':
+            CONFIG['output_dir'] = 'results/exp_x2'
+
+    elif _exp == 'x3':
+        # X3: SharpeLoss + DualShockExpert + Loose Overlay
+        CONFIG.update(_LOOSE_OVERLAY)
+        CONFIG['loss_type'] = 'sharpe'
+        CONFIG['model_type'] = 'dual_shock_expert'
+        CONFIG['lambda_dd'] = 0.3
+        CONFIG['regime_dd_scale'] = 2.0
+        CONFIG['return_target_monthly'] = 0.0083
+        CONFIG['return_hinge_weight'] = 2.0
+        if CONFIG['output_dir'] == 'results/walkforward':
+            CONFIG['output_dir'] = 'results/exp_x3'
+
+    # =========================================================================
+    # v6b: Return Drought 해결 — lambda_risk + max_bil_floor + overlay 완화
+    # =========================================================================
+    # 공통 "Very Loose Overlay" (x4/x5 공유)
+    _VERY_LOOSE_OVERLAY = dict(
+        target_vol=0.16,         # 0.13 → 0.16: equity 60~75% 허용
+        max_leverage=2.0,        # 1.8  → 2.0
+        dd_threshold_1=0.07,     # 0.05 → 0.07
+        dd_threshold_2=0.10,     # 0.08 → 0.10
+        bull_leverage=2.5,       # 2.0  → 2.5
+        use_path_mdd=False,
+    )
+
+    if _exp == 'x4':
+        # X4: GRU + SharpeLoss + lambda_risk↓ + bil_floor↓ + return hinge 강화
+        # 핵심 변경: lambda_risk 2.0→1.0 (CVaR 보수성 반감)
+        #           max_bil_floor 0.7→0.3 (위기 시 현금 비중 70%→30%)
+        CONFIG.update(_VERY_LOOSE_OVERLAY)
+        CONFIG['loss_type'] = 'sharpe'
+        CONFIG['lambda_risk'] = 1.0            # ★ 2.0 → 1.0
+        CONFIG['max_bil_floor'] = 0.3          # ★ 0.7 → 0.3
+        CONFIG['lambda_dd'] = 0.1              # 0.3 → 0.1 (MDD 이미 -9.7% 여유)
+        CONFIG['regime_dd_scale'] = 1.0        # 2.0 → 1.0
+        CONFIG['return_target_monthly'] = 0.01 # 연 12% 목표 (오버슈팅)
+        CONFIG['return_hinge_weight'] = 5.0    # 2.0 → 5.0 (강력 추진)
+        if CONFIG['output_dir'] == 'results/walkforward':
+            CONFIG['output_dir'] = 'results/exp_x4'
+
+    elif _exp == 'x5':
+        # X5: DualShockExpert + X4와 동일한 loss/overlay
+        # lambda_risk=1.0 → expert_lambda_scale = 1.0/2.0 = 0.5
+        #   → expert lambdas [1,3,5] × 0.5 = [0.5, 1.5, 2.5]
+        CONFIG.update(_VERY_LOOSE_OVERLAY)
+        CONFIG['loss_type'] = 'sharpe'
+        CONFIG['model_type'] = 'dual_shock_expert'
+        CONFIG['lambda_risk'] = 1.0            # ★ expert scale 0.5
+        CONFIG['max_bil_floor'] = 0.3          # ★
+        CONFIG['lambda_dd'] = 0.1
+        CONFIG['regime_dd_scale'] = 1.0
+        CONFIG['return_target_monthly'] = 0.01
+        CONFIG['return_hinge_weight'] = 5.0
+        if CONFIG['output_dir'] == 'results/walkforward':
+            CONFIG['output_dir'] = 'results/exp_x5'
+
+    elif _exp == 'x6':
+        # X6: GRU + SharpeLoss + lambda_risk=0.5 + Vol Targeting 완전 해제
+        # 모델 자체의 Return 상한선을 확인하는 ablation 실험
+        CONFIG['loss_type'] = 'sharpe'
+        CONFIG['lambda_risk'] = 0.5            # ★★ 극단적 공격
+        CONFIG['max_bil_floor'] = 0.2          # ★★
+        CONFIG['lambda_dd'] = 0.05             # 최소
+        CONFIG['regime_dd_scale'] = 1.0
+        CONFIG['return_target_monthly'] = 0.012  # 연 14.4% 목표
+        CONFIG['return_hinge_weight'] = 5.0
+        CONFIG['vol_targeting'] = False        # ★★ overlay 완전 해제
+        CONFIG['use_path_mdd'] = False
+        if CONFIG['output_dir'] == 'results/walkforward':
+            CONFIG['output_dir'] = 'results/exp_x6'
+
+    # baseline: 기존 설정 유지 (아무것도 덮어쓰지 않음)
+
     print("=" * 70)
-    print("  v4 Walk-Forward: Regime-Conditional CVaR")
-    print("  GRU + CVaR + Regime Q-Concat + Crisis Overlay")
+    print("  v5 Walk-Forward: Decision-Aware Tail Risk Optimization")
+    print("  GRU / DualShock + CVaR + DD-Conditioned Q + PathMDD")
     print(f"  Distribution:  {args.dist_type.upper()} {f'(df={args.t_df})' if args.dist_type == 't' else ''}")
     print(f"  Correlation:   {'OFF' if args.no_correlation else 'ON'}")
     print(f"  Daily Panic:   {'OFF' if args.no_daily_panic else 'ON'}")
@@ -497,14 +709,23 @@ def main():
     print("=" * 70)
     
     # --- Config summary ---
-    print(f"\n  model:         {CONFIG['model_type'].upper()} (hidden={CONFIG['hidden_dim']})")
+    print(f"\n  exp:           {_exp.upper()}")
+    print(f"  model:         {CONFIG['model_type'].upper()} (hidden={CONFIG['hidden_dim']})")
+    print(f"  loss_type:     {CONFIG['loss_type'].upper()}")
     print(f"  regime_dim:    {CONFIG['regime_dim']}")
     print(f"  lambda_risk:   {CONFIG['lambda_risk']} (Mean-CVaR)")
+    print(f"  max_bil_floor: {CONFIG['max_bil_floor']} (Crisis cash cap)")
     print(f"  lambda_dd:     {CONFIG['lambda_dd']} (Drawdown)")
+    print(f"  eta:           {CONFIG['eta']} (Risk penalty)")
+    print(f"  return_hinge:  {CONFIG['return_target_monthly']:.4f}/mo × {CONFIG['return_hinge_weight']:.1f}")
+    print(f"  realized_cost: {CONFIG['realized_cost_bps']:.1f} bps")
+    print(f"  path_mdd:      {'ON' if CONFIG['use_path_mdd'] else 'OFF'}")
     print(f"  regime_dd:     ×{CONFIG['regime_dd_scale']} (Crisis boost)")
     print(f"  weight_decay:  {CONFIG['weight_decay']}")
     print(f"  vol_target:    {CONFIG['target_vol']:.0%}" if CONFIG['vol_targeting'] else "  vol_target:  OFF")
     print(f"  n_seeds:       {CONFIG['n_seeds']}")
+    print(f"  sample:        OOS {CONFIG['oos_start']} -> 2025-12-31 (download end {CONFIG['end_date']})")
+    print(f"  output_dir:    {CONFIG['output_dir']}")
     
     # --- Data Loading ---
     print("\n[Step 1] Loading Data...")
@@ -529,7 +750,7 @@ def main():
         assets_13=CONFIG.get('assets_13', False),
     )
     
-    y_raw = asset_returns_df.reindex(y_dates).values
+    y_raw = asset_returns_df[asset_names].reindex(y_dates).values
     nan_mask = np.isnan(y_raw).any(axis=1)
     if nan_mask.any():
         print(f"  [WARNING] {nan_mask.sum()} NaN rows in y_raw, filling with 0.0")
@@ -587,7 +808,12 @@ def main():
     
     # --- Walk-Forward ---
     print("\n[Step 2] Walk-Forward Cross-Validation")
-    folds = define_folds(dates, CONFIG['seq_length'])
+    folds = define_folds_dynamic(
+        dates,
+        CONFIG['seq_length'],
+        CONFIG.get('oos_start', '2016-07-31'),
+        CONFIG.get('test_window_months', 24),
+    )
     print(f"  Folds: {len(folds)}")
     for i, f in enumerate(folds):
         print(f"    Fold {i+1}: train={len(f['train_idx'])}, "
@@ -717,33 +943,110 @@ def main():
         bl = baseline_metrics[metric]
         print(f"  {metric:<20s} {bm:{fmt}} ± {bs:{fmt}}   {am:{fmt}} ± {as_:{fmt}}   {em:{fmt}}   {bl:{fmt}}")
     
-    # --- Save OOS monthly returns as CSV (for run_compare.py) ---
+    # --- Save OOS artifacts ---
+    output_dir = CONFIG['output_dir']
+    os.makedirs(output_dir, exist_ok=True)
+
     all_test_dates = np.concatenate([dates[f['test_idx']] for f in folds])
-    if CONFIG['vol_targeting']:
-        final_weights = adj_ensemble
-    else:
-        final_weights = ensemble_weights
-    port_ret_series = (final_weights * all_test_returns).sum(axis=1)
-    port_ret_df = pd.DataFrame(
-        {'return': port_ret_series}, 
-        index=pd.DatetimeIndex(all_test_dates, name='date')
+    final_weights = final_ensemble if 'final_ensemble' in locals() else (
+        adj_ensemble if CONFIG['vol_targeting'] else ensemble_weights
     )
-    os.makedirs('results/walkforward', exist_ok=True)
-    port_ret_df.to_csv('results/walkforward/v4_port_returns.csv')
-    print(f"\n  OOS returns saved to results/walkforward/v4_port_returns.csv ({len(port_ret_df)} months)")
-    
-    # --- Save ---
+    port_ret_series = (final_weights * all_test_returns).sum(axis=1)
+
+    port_ret_df = pd.DataFrame(
+        {'return': port_ret_series},
+        index=pd.DatetimeIndex(all_test_dates, name='date'),
+    )
+    port_ret_path = os.path.join(output_dir, 'port_returns.csv')
+    port_ret_df.to_csv(port_ret_path)
+    print(f"\n  OOS returns saved to {port_ret_path} ({len(port_ret_df)} months)")
+
+    port_weights_df = pd.DataFrame(
+        final_weights,
+        index=pd.DatetimeIndex(all_test_dates, name='date'),
+        columns=asset_names,
+    )
+    port_weights_path = os.path.join(output_dir, 'port_weights.csv')
+    port_weights_df.to_csv(port_weights_path)
+    print(f"  OOS weights saved to {port_weights_path}")
+
+    raw_weights_df = pd.DataFrame(
+        ensemble_weights,
+        index=pd.DatetimeIndex(all_test_dates, name='date'),
+        columns=asset_names,
+    )
+    raw_weights_path = os.path.join(output_dir, 'raw_weights.csv')
+    raw_weights_df.to_csv(raw_weights_path)
+    print(f"  OOS raw weights saved to {raw_weights_path}")
+
+    asset_ret_df = pd.DataFrame(
+        all_test_returns,
+        index=pd.DatetimeIndex(all_test_dates, name='date'),
+        columns=asset_names,
+    )
+    asset_returns_path = os.path.join(output_dir, 'asset_returns.csv')
+    asset_ret_df.to_csv(asset_returns_path)
+    print(f"  OOS asset returns saved to {asset_returns_path}")
+
+    fold_rows = []
+    offset = 0
+    for fold_i, fold in enumerate(folds, start=1):
+        fold_len = len(fold['test_idx'])
+        fold_slice = slice(offset, offset + fold_len)
+        fold_metrics = evaluate_portfolio(final_weights[fold_slice], all_test_returns[fold_slice])
+        fold_rows.append({
+            'fold': fold_i,
+            'test_start': str(pd.Timestamp(fold['test_start']).date()),
+            'test_end': str(pd.Timestamp(fold['test_end']).date()),
+            'n_months': int(fold_len),
+            'sharpe': float(fold_metrics['sharpe']),
+            'annual_return': float(fold_metrics['annual_return']),
+            'mdd': float(fold_metrics['mdd']),
+            'triple': bool(is_triple(fold_metrics)),
+        })
+        offset += fold_len
+
+    fold_results_path = os.path.join(output_dir, 'fold_results.csv')
+    pd.DataFrame(fold_rows).to_csv(fold_results_path, index=False)
+    print(f"  Fold-level results saved to {fold_results_path}")
+
+    metrics_payload = {
+        'sharpe': float(ensemble_after['sharpe']),
+        'return': float(ensemble_after['annual_return']),
+        'mdd': float(ensemble_after['mdd']),
+        'triple': bool(is_triple(ensemble_after)),
+        'thresholds': {
+            'sharpe_min': 1.0,
+            'return_min': 0.10,
+            'mdd_min': -0.10,
+        },
+        'experiment': {
+            'exp': _exp,
+            'model_type': CONFIG['model_type'],
+            'loss_type': CONFIG.get('loss_type', 'decision_aware'),
+            'lambda_dd': float(CONFIG['lambda_dd']),
+            'lambda_risk': float(CONFIG['lambda_risk']),
+            'max_bil_floor': float(CONFIG['max_bil_floor']),
+            'eta': float(CONFIG['eta']),
+            'target_vol': float(CONFIG['target_vol']),
+            'dd_threshold_1': float(CONFIG['dd_threshold_1']),
+            'dd_threshold_2': float(CONFIG['dd_threshold_2']),
+            'return_target_monthly': float(CONFIG.get('return_target_monthly', 0.0)),
+            'realized_cost_bps': float(CONFIG.get('realized_cost_bps', 0.0)),
+            'use_path_mdd': bool(CONFIG.get('use_path_mdd', False)),
+            'oos_start': CONFIG.get('oos_start'),
+            'oos_end': '2025-12-31',
+        },
+    }
+    metrics_path = os.path.join(output_dir, 'metrics.json')
+    with open(metrics_path, 'w', encoding='utf-8') as f:
+        json.dump(metrics_payload, f, indent=2)
+
     summary = {
-        'version': 'v4',
+        'version': 'v5',
         'dist_type': args.dist_type,
         't_df': args.t_df,
-        'use_correlation': CONFIG['use_correlation'],
-        'use_daily_panic': CONFIG.get('use_daily_panic', False),
-        'use_nfci': CONFIG.get('use_nfci', False),
-        'e2e_regime': CONFIG.get('e2e_regime', False),
-        'use_ea_midas': CONFIG.get('use_ea_midas', False),
-        'assets_13': CONFIG.get('assets_13', False),
-        'config': {k: str(v) if not isinstance(v, (int, float, bool, str)) else v 
+        'config': {k: str(v) if not isinstance(v, (int, float, bool, str)) else v
                    for k, v in CONFIG.items()},
         'n_folds': len(folds),
         'before_vt': {
@@ -760,18 +1063,23 @@ def main():
             'sharpe': float(ensemble_after['sharpe']),
             'annual_return': float(ensemble_after['annual_return']),
             'mdd': float(ensemble_after['mdd']),
+            'triple': bool(is_triple(ensemble_after)),
         },
         'baseline': {
             'sharpe': float(baseline_metrics['sharpe']),
             'annual_return': float(baseline_metrics['annual_return']),
             'mdd': float(baseline_metrics['mdd']),
         },
+        'fold_results': fold_rows,
     }
-    
-    with open('results/walkforward/summary.json', 'w') as f:
+
+    summary_path = os.path.join(output_dir, 'summary.json')
+    with open(summary_path, 'w', encoding='utf-8') as f:
         json.dump(summary, f, indent=2)
-    
-    print(f"\n  Results saved to results/walkforward/summary.json")
+
+    print(f"  Metrics saved to {metrics_path}")
+    print(f"  Summary saved to {summary_path}")
+    print(f"  Triple target: {'PASS' if metrics_payload['triple'] else 'FAIL'}")
     print("=" * 70)
 
 

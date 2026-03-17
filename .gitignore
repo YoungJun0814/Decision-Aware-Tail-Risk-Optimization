@@ -50,6 +50,9 @@ checkpoints/
 .vscode/settings.json
 .idea/
 
+# Claude Code local settings (machine-specific, contains server IPs)
+.claude/
+
 # OS
 .DS_Store
 Thumbs.db
