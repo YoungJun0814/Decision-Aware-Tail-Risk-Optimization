@@ -75,6 +75,7 @@ MACRO_REGIME_FEATURES = {
 # Regime 확률 데이터 경로
 REGIME_PROB_PATH = Path(__file__).parent.parent / 'data' / 'processed' / 'prob_data.csv'
 REGIME_4STATE_PATH = Path(__file__).parent.parent / 'data' / 'processed' / 'regime_4state.csv'
+REGIME_4STATE_PIT_PATH = Path(__file__).parent.parent / 'data' / 'processed' / 'regime_4state_pit.csv'
 
 
 # =============================================================================
@@ -267,13 +268,17 @@ def get_regime_4state() -> pd.DataFrame:
     Columns: Prob_Bull, Prob_Sideways, Prob_Correction, Prob_Crisis
     생성: python -m src.gen_regime_4state
     """
-    if not REGIME_4STATE_PATH.exists():
+    regime_path = REGIME_4STATE_PIT_PATH if REGIME_4STATE_PIT_PATH.exists() else REGIME_4STATE_PATH
+
+    if not regime_path.exists():
         print(f"[WARNING] 4-state Regime 데이터가 없습니다: {REGIME_4STATE_PATH}")
         print("[INFO] 'python -m src.gen_regime_4state' 명령으로 생성하세요.")
         return pd.DataFrame()
     
     print(f"[INFO] 4-state Regime 확률 로드 중...")
-    df = pd.read_csv(REGIME_4STATE_PATH, parse_dates=['Date'], index_col='Date')
+    if regime_path == REGIME_4STATE_PIT_PATH:
+        print("[INFO] PIT 4-state Regime file detected: regime_4state_pit.csv")
+    df = pd.read_csv(regime_path, parse_dates=['Date'], index_col='Date')
     
     prob_cols = ['Prob_Bull', 'Prob_Sideways', 'Prob_Correction', 'Prob_Crisis']
     result = df[prob_cols]

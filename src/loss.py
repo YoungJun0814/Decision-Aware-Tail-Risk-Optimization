@@ -7,15 +7,22 @@ Loss Module
 
 주의: 예측 오차(MSE)가 아닙니다!
 
-Loss = -(Return) + η × (Risk) + κ(VIX) × (Turnover)
+Loss = -(Return) + η × (Risk) + κ(VIX) × (Turnover) + λ_dd × (PathMDD)
 
 - Return: 포트폴리오 수익률 (최대화 → 음수로 변환)
 - Risk: 분산/CVaR (Role B가 확정)
 - κ(VIX): 변동성 연동 거래비용 계수 (높은 VIX에서는 매매 자제)
+- PathMDD: 전체 경로(fold) 수준의 최대 낙폭 패널티 (Triple 직접 타게팅)
+
+v5 신규 추가:
+- PathAwareMDDLoss: 배치 레벨이 아닌 전체 fold 경로의 MDD를 직접 최적화
+  - Hinge Loss: MDD가 target(-10%)보다 나쁠 때만 패널티 부과
+  - Top-K 에피소드 패널티: 다수의 드로다운 에피소드를 동시 억제 (whack-a-mole 방지)
 """
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class DecisionAwareLoss(nn.Module):
@@ -41,6 +48,7 @@ class DecisionAwareLoss(nn.Module):
         risk_type: str = 'downside_deviation',
         lambda_dd: float = 0.0,
         regime_dd_scale: float = 3.0,  # v4: Crisis에서 DD penalty ×(1+3*p_crisis)
+        realized_cost_bps: float = 0.0,  # v5: 실제 거래비용을 수익률에서 직접 차감 (예: 10.0 = 10bps)
     ):
         super(DecisionAwareLoss, self).__init__()
         self.eta = eta
@@ -49,6 +57,7 @@ class DecisionAwareLoss(nn.Module):
         self.risk_type = risk_type
         self.lambda_dd = lambda_dd
         self.regime_dd_scale = regime_dd_scale
+        self.realized_cost_bps = realized_cost_bps / 10000.0  # bps → 소수점
     
     def compute_dynamic_cost(self, vix: torch.Tensor) -> torch.Tensor:
         """
@@ -92,8 +101,22 @@ class DecisionAwareLoss(nn.Module):
         
         # ======================================================================
         # Term 1: Return (수익률 최대화 -> 음수로 최소화 문제 변환)
+        # v5: realized_cost_bps > 0이면 실제 거래비용을 수익률에서 직접 차감
         # ======================================================================
         portfolio_returns = (weights * future_returns).sum(dim=1)
+
+        # 실현 거래비용 직접 차감 (Loss와 실제 Triple 평가 간 괴리 축소)
+        if self.realized_cost_bps > 0.0 and prev_weights is not None:
+            per_sample_turnover = torch.abs(weights - prev_weights).sum(dim=1)
+            cost_deduction = self.realized_cost_bps * per_sample_turnover
+            portfolio_returns = portfolio_returns - cost_deduction
+        elif self.realized_cost_bps > 0.0:
+            # prev_weights 없을 때: 균등 비중 기준 turnover
+            eq_w = torch.ones_like(weights) / weights.shape[1]
+            per_sample_turnover = torch.abs(weights - eq_w).sum(dim=1)
+            cost_deduction = self.realized_cost_bps * per_sample_turnover
+            portfolio_returns = portfolio_returns - cost_deduction
+
         return_loss = -portfolio_returns.mean()
         
         # ======================================================================
@@ -317,6 +340,92 @@ class RegimeAwareLoss(nn.Module):
         return total, details
 
 # =============================================================================
+# PathAwareMDDLoss — 전체 경로(Fold) 수준의 MDD 직접 최적화 (v5 신규)
+# =============================================================================
+
+class PathAwareMDDLoss(nn.Module):
+    """
+    Path-Level Maximum Drawdown Loss.
+
+    배치 레벨의 근사 drawdown이 아닌, Trainer에서 에폭 단위로 수집한
+    **전체 fold 경로(시간순)**의 누적 수익률에서 MDD를 계산합니다.
+
+    핵심 설계:
+    - Hinge Loss: MDD가 목표치(mdd_target)보다 나쁠 때만 패널티. 목표 달성 후엔 0.
+    - Top-K 에피소드 패널티: 최악 K개 시점의 drawdown을 동시 억제.
+      → "COVID를 고치면 Inflation이 터지는" whack-a-mole 현상 방지.
+    - Soft Margin: MDD가 목표보다 soft_margin만큼 더 나쁠 때부터 패널티 시작.
+      → MDD = -8% 시점부터 -10% 목표를 향해 점진적 압박.
+
+    Args:
+        mdd_target (float): 목표 MDD (기본 -0.10 = -10%). 부호 주의 (음수).
+        mdd_lambda (float): 전체 MDD 패널티 가중치.
+        soft_margin (float): 사전 경고 마진. mdd_target보다 이 값만큼 더 낫을 때부터 패널티 시작.
+                              예: soft_margin=0.02이면 -8%부터 시작.
+        top_k (int): Top-K 에피소드 패널티에서 고려할 최악 시점 수.
+        top_k_lambda (float): Top-K 에피소드 패널티 가중치 (mdd_lambda 대비 상대적).
+
+    Usage (in Trainer):
+        # 에폭 동안 포트폴리오 수익률을 시간순으로 수집
+        epoch_returns = torch.cat(all_port_rets_in_order)  # (T,)
+        path_loss = path_mdd_loss_fn(epoch_returns)
+        path_loss.backward()
+    """
+
+    def __init__(
+        self,
+        mdd_target: float = -0.10,
+        mdd_lambda: float = 5.0,
+        soft_margin: float = 0.02,
+        top_k: int = 5,
+        top_k_lambda: float = 0.5,
+    ):
+        super(PathAwareMDDLoss, self).__init__()
+        self.mdd_target = mdd_target          # -0.10 (음수)
+        self.mdd_lambda = mdd_lambda
+        self.soft_margin = soft_margin        # 0.02 → -8%부터 패널티 시작
+        self.top_k = top_k
+        self.top_k_lambda = top_k_lambda
+
+    def forward(self, path_returns: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            path_returns: (T,) 시간순 포트폴리오 수익률 텐서.
+                          T = fold 내 전체 학습 시점 수.
+
+        Returns:
+            loss: 스칼라 패널티 (MDD가 목표 이내이면 0).
+        """
+        if path_returns.shape[0] < 2:
+            return torch.tensor(0.0, device=path_returns.device,
+                                dtype=path_returns.dtype)
+
+        # 누적 수익률 및 피크-투-트로프 계산
+        cum_ret = torch.cumprod(1.0 + path_returns, dim=0)        # (T,)
+        peak    = torch.cummax(cum_ret, dim=0).values              # (T,) running peak
+        drawdowns = (peak - cum_ret) / (peak + 1e-8)              # (T,) ≥ 0
+
+        # --- (1) 전체 경로 MDD Hinge Loss ---
+        # drawdowns는 양수 (낙폭률). mdd_target은 음수 (-0.10).
+        # 낙폭률 > (-mdd_target + soft_margin)이면 패널티 발생.
+        mdd = drawdowns.max()
+        threshold = -self.mdd_target + self.soft_margin   # 0.10 - 0.02 = 0.08
+        hinge_mdd = F.relu(mdd - threshold)               # mdd > 0.08이면 양수
+
+        # --- (2) Top-K 에피소드 패널티 ---
+        # 상위 K개 최악 drawdown 시점에 대한 추가 패널티.
+        # 단일 에피소드만 개선하고 다른 에피소드가 악화되는 현상 방지.
+        k = min(self.top_k, drawdowns.shape[0])
+        top_k_dd, _ = torch.topk(drawdowns, k, largest=True, sorted=True)
+        # 각각에 대해 hinge: 목표치(soft_margin 없이 엄격하게 적용)
+        top_k_threshold = -self.mdd_target                # 0.10
+        top_k_hinge = F.relu(top_k_dd - top_k_threshold).mean()
+
+        total_loss = self.mdd_lambda * hinge_mdd + self.mdd_lambda * self.top_k_lambda * top_k_hinge
+        return total_loss
+
+
+# =============================================================================
 # SharpeLoss — Direct Sharpe Maximization (v3)
 # =============================================================================
 
@@ -336,15 +445,19 @@ class SharpeLoss(nn.Module):
         kappa_vix_scale: VIX 연동 거래비용
         regime_dd_scale: Crisis regime에서 lambda_dd 스케일링 계수
     """
-    def __init__(self, lambda_dd: float = 1.0, 
+    def __init__(self, lambda_dd: float = 1.0,
                  kappa_base: float = 0.001,
                  kappa_vix_scale: float = 0.0001,
-                 regime_dd_scale: float = 3.0):
+                 regime_dd_scale: float = 3.0,
+                 return_target_monthly: float = 0.0,
+                 return_hinge_weight: float = 2.0):
         super().__init__()
         self.lambda_dd = lambda_dd
         self.kappa_base = kappa_base
         self.kappa_vix_scale = kappa_vix_scale
         self.regime_dd_scale = regime_dd_scale
+        self.return_target_monthly = return_target_monthly  # 월 목표수익률 (0이면 비활성)
+        self.return_hinge_weight = return_hinge_weight      # 미달 시 패널티 가중치
     
     def forward(self, weights, returns, vix=None, 
                 prev_weights=None, regime_probs=None):
@@ -392,8 +505,19 @@ class SharpeLoss(nn.Module):
             turnover = torch.abs(weights - eq_weights).sum(dim=1)
             turnover_cost = (kappa * turnover).mean()
         
-        total = sharpe_loss + effective_lambda_dd * dd_penalty + turnover_cost
-        
+        # --- 4. Return Target Hinge (선택적) ---
+        # 배치 평균 월수익률이 return_target_monthly에 미달하면 패널티 부과.
+        # Sharpe 최대화와 병행해 return 하한을 직접 강제한다.
+        # 연 10% ≈ 월 0.83% → return_target_monthly=0.0083 권장.
+        return_hinge = torch.tensor(0.0, device=weights.device)
+        if self.return_target_monthly > 0.0:
+            return_hinge = F.relu(self.return_target_monthly - port_ret.mean())
+
+        total = (sharpe_loss
+                 + effective_lambda_dd * dd_penalty
+                 + turnover_cost
+                 + self.return_hinge_weight * return_hinge)
+
         return total
     
     def _drawdown_penalty(self, port_ret):

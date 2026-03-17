@@ -57,7 +57,11 @@ class BaseBLModel(nn.Module):
         
         # --- 전망(View) 생성 헤드 ---
         # Q head: regime_dim > 0 이면 concat(hidden, regime) → Q
-        q_input_dim = hidden_dim + regime_dim
+        # v5: dd_state_dim=3 추가 — 현재 DD 상태를 Q head에 전달하여
+        #     포트폴리오 상태 인식 포트폴리오 결정 지원.
+        # dd_state = [current_drawdown(1), dd_duration_months(1), dd_speed(1)]
+        self.dd_state_dim = 3  # Drawdown state 차원 (고정)
+        q_input_dim = hidden_dim + regime_dim + self.dd_state_dim
         self.head_q = nn.Linear(q_input_dim, num_assets)
         # P: 자산 선택 행렬의 대각 원소 (0 ~ 1, sigmoid)
         self.head_p_diag = nn.Linear(hidden_dim, num_assets)
@@ -118,25 +122,45 @@ class BaseBLModel(nn.Module):
         )
 
     def get_bl_parameters(self, hidden_features: torch.Tensor, sigma: torch.Tensor = None,
-                          regime_probs: torch.Tensor = None):
+                          regime_probs: torch.Tensor = None,
+                          dd_state: torch.Tensor = None):
         """
         BL 파라미터(P, Q, Omega) 생성.
-        
+
         Args:
             hidden_features: (B, hidden_dim) 인코더 출력
             sigma: (B, N, N) 공분산 행렬 (formula/hybrid 모드에서 필요)
             regime_probs: (B, R) regime 확률 (v4: Q head concat용)
-        
+            dd_state: (B, 3) Drawdown 상태 벡터 (v5 신규):
+                [current_drawdown, dd_duration_months_norm, dd_speed_norm]
+                None이면 영벡터(0)로 처리 → 기존과 동일한 동작.
+
         Returns:
             p: (B, N, N) Pick 행렬
             q: (B, N, 1) 전망 벡터
             omega: (B, N, N) 불확실성 행렬
         """
-        # Q: regime concat (v4) — regime_dim=0이면 기존과 동일
-        if self.regime_dim > 0 and regime_probs is not None:
-            q_input = torch.cat([hidden_features, regime_probs], dim=-1)
+        B = hidden_features.shape[0]
+        device = hidden_features.device
+
+        # v5: DD state — None이면 영벡터로 대체 (기존 동작 유지)
+        if dd_state is None:
+            dd_state = torch.zeros(B, self.dd_state_dim, device=device,
+                                   dtype=hidden_features.dtype)
         else:
-            q_input = hidden_features
+            dd_state = dd_state.to(device=device, dtype=hidden_features.dtype)
+
+        # Q: regime concat (v4) + dd_state concat (v5)
+        q_parts = [hidden_features]
+        if self.regime_dim > 0 and regime_probs is not None:
+            q_parts.append(regime_probs)
+        else:
+            # regime_probs 없을 때 regime_dim 크기 영벡터로 패딩 유지
+            if self.regime_dim > 0:
+                q_parts.append(torch.zeros(B, self.regime_dim, device=device,
+                                           dtype=hidden_features.dtype))
+        q_parts.append(dd_state)
+        q_input = torch.cat(q_parts, dim=-1)
         q = self.tanh(self.head_q(q_input)).unsqueeze(-1)
         
         # P: 대각 행렬
@@ -245,18 +269,22 @@ class BaseBLModel(nn.Module):
         
         return mu_bl.squeeze(-1), sigma_out
 
-    def forward(self, x: torch.Tensor, pi: torch.Tensor = None, sigma: torch.Tensor = None, 
+    def forward(self, x: torch.Tensor, pi: torch.Tensor = None, sigma: torch.Tensor = None,
                 is_crisis: float = 0.0, regime_probs: torch.Tensor = None,
-                macro_features: torch.Tensor = None) -> torch.Tensor:
+                macro_features: torch.Tensor = None,
+                dd_state: torch.Tensor = None) -> torch.Tensor:
         """
-        Forward Pass (v4: regime conditioning + macro features 지원)
-        
+        Forward Pass (v4: regime conditioning + macro features 지원, v5: dd_state 추가)
+
         Args:
             x: (Batch, Seq, Feat) - 자산 수익률 또는 특징 데이터
             is_crisis: 1.0이면 위기 상황(VIX > 30)으로 간주하여 안전망 가동.
             regime_probs: (B, R) regime 확률 (v4, optional. E2E일 때는 HMM target)
             macro_features: (B, macro_dim) 매크로 피처 (optional, RegimeHead 전용)
-        
+            dd_state: (B, 3) Drawdown 상태 벡터 (v5, optional):
+                [current_drawdown_normalized, dd_duration_normalized, dd_speed_normalized]
+                None이면 영벡터로 대체 → 기존 동작과 완전히 동일.
+
         Returns:
             weights: (B, N) when e2e_regime=False
             (weights, e2e_regime_probs): when e2e_regime=True
@@ -290,8 +318,12 @@ class BaseBLModel(nn.Module):
         if hasattr(self, 'macro_regime_head') and macro_features is not None:
             regime_probs_for_model = self.macro_regime_head(hidden, macro_features=macro_features)
         
-        # 2. 뷰 생성 (v4: regime_probs를 Q head에 전달)
-        p, q, omega = self.get_bl_parameters(hidden, sigma=sigma, regime_probs=regime_probs_for_model)
+        # 2. 뷰 생성 (v4: regime_probs를 Q head에 전달, v5: dd_state 추가)
+        p, q, omega = self.get_bl_parameters(
+            hidden, sigma=sigma,
+            regime_probs=regime_probs_for_model,
+            dd_state=dd_state,
+        )
         
         # 3. Black-Litterman 공식
         mu_bl, sigma_out = self.black_litterman_formula(p, q, omega, pi, sigma)
@@ -763,37 +795,295 @@ class RegimeFiLMGRU(nn.Module):
 
 
 # =============================================================================
-# 4. 모델 팩토리 함수
+# 4. Dual-Shock Expert System (v5 New)
+# =============================================================================
+
+class DualShockExpertModel(BaseBLModel):
+    """
+    Dual-Shock Expert System (v5).
+
+    세 전문가가 레짐 인식 게이팅 네트워크를 통해 혼합됩니다:
+      - Trend Expert  : 추세 추종 / 표준 모멘텀  (lambda_risk = 1.0)
+      - Inflation Expert: 인플레이션/금리 충격 방어 (lambda_risk = 3.0)
+      - Crash Expert  : 급락/꼬리 위험 헤지       (lambda_risk = 5.0)
+
+    아키텍처:
+        Input → GRU (공유) → hidden
+        [hidden, regime] → Gate → [g_trend, g_infl, g_crash]
+        각 전문가: (hidden, regime, dd_state) → Q_i, P, Ω → BL → CVaR → w_i
+        w_final = Σ g_i * w_i → CrisisOverlay → output
+
+    Notes:
+        - P/Ω 헤드는 기반 클래스(BaseBLModel)의 것을 공유하여 파라미터 절약.
+        - 각 전문가는 독립 Q 헤드와 독립 P 헤드를 가짐.
+        - Omega 헤드는 공유 (omega_mode에 따라 학습/공식/하이브리드).
+        - dd_state는 각 전문가 Q 헤드의 입력에 포함.
+    """
+
+    EXPERT_NAMES = ['trend', 'inflation', 'crash']
+    _EXPERT_LAMBDA_RISK = [1.0, 3.0, 5.0]  # trend / inflation / crash
+
+    def __init__(self, input_dim: int, num_assets: int,
+                 hidden_dim: int = 32, num_layers: int = 2,
+                 dropout: float = 0.2,
+                 omega_mode: str = 'learnable', sigma_mode: str = 'prior',
+                 regime_dim: int = 4, macro_dim: int = 0,
+                 max_bil_floor: float = 0.5,
+                 dist_type: str = 't', t_df: float = 5.0,
+                 e2e_regime: bool = False,
+                 gate_hidden: int = 16,
+                 lambda_risk_scale: float = 1.0):
+        """
+        Args:
+            lambda_risk_scale: Expert lambda_risk를 일괄 스케일링.
+                기본 [1.0, 3.0, 5.0] × scale.
+                scale=0.5 → [0.5, 1.5, 2.5] (더 공격적).
+                scale=1.0 → 기존 동작.
+        """
+        super().__init__(
+            input_dim=input_dim, num_assets=num_assets,
+            hidden_dim=hidden_dim, dropout=dropout,
+            omega_mode=omega_mode, sigma_mode=sigma_mode,
+            lambda_risk=1.0,          # Trend expert default; overridden per-expert
+            regime_dim=regime_dim, macro_dim=macro_dim,
+            max_bil_floor=max_bil_floor,
+            dist_type=dist_type, t_df=t_df,
+            e2e_regime=e2e_regime,
+        )
+
+        self._lambda_risk_scale = lambda_risk_scale
+
+        # Shared GRU encoder
+        self.gru = nn.GRU(
+            input_dim, hidden_dim, num_layers,
+            batch_first=True,
+            dropout=dropout if num_layers > 1 else 0,
+        )
+
+        n_experts = len(self.EXPERT_NAMES)
+
+        # Per-expert Q heads (same input dim as BaseBLModel.head_q)
+        q_input_dim = hidden_dim + regime_dim + self.dd_state_dim
+        self.expert_q_heads = nn.ModuleDict({
+            name: nn.Linear(q_input_dim, num_assets)
+            for name in self.EXPERT_NAMES
+        })
+
+        # Per-expert P heads
+        self.expert_p_heads = nn.ModuleDict({
+            name: nn.Linear(hidden_dim, num_assets)
+            for name in self.EXPERT_NAMES
+        })
+
+        # Fixed lambda_risk per expert — scaled by lambda_risk_scale
+        scaled_lambdas = [l * lambda_risk_scale for l in self._EXPERT_LAMBDA_RISK]
+        self.register_buffer(
+            'expert_lambda_risk',
+            torch.tensor(scaled_lambdas, dtype=torch.float32),
+        )
+
+        # Gating network: [hidden, regime] → n_experts
+        gate_in = hidden_dim + regime_dim
+        self.gate = nn.Sequential(
+            nn.Linear(gate_in, gate_hidden),
+            nn.ReLU(),
+            nn.Linear(gate_hidden, n_experts),
+        )
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """Shared GRU encoder → last hidden state."""
+        _, h_n = self.gru(x)
+        return h_n[-1]  # (B, H)
+
+    def _get_expert_bl_params(self, expert_name: str,
+                               hidden: torch.Tensor,
+                               sigma: torch.Tensor,
+                               regime_probs,
+                               dd_state):
+        """Compute (P, Q, Ω) for one expert using its dedicated Q/P heads."""
+        B = hidden.shape[0]
+        device = hidden.device
+
+        # DD state fallback
+        if dd_state is None:
+            dd_state_t = torch.zeros(B, self.dd_state_dim, device=device,
+                                     dtype=hidden.dtype)
+        else:
+            dd_state_t = dd_state.to(device=device, dtype=hidden.dtype)
+
+        # Q input: [hidden, regime (or zeros), dd_state]
+        q_parts = [hidden]
+        if self.regime_dim > 0:
+            if regime_probs is not None:
+                q_parts.append(regime_probs)
+            else:
+                q_parts.append(torch.zeros(B, self.regime_dim, device=device,
+                                           dtype=hidden.dtype))
+        q_parts.append(dd_state_t)
+        q_input = torch.cat(q_parts, dim=-1)
+
+        q = self.tanh(self.expert_q_heads[expert_name](q_input)).unsqueeze(-1)
+
+        # P from expert-specific head
+        p_diag = torch.sigmoid(self.expert_p_heads[expert_name](hidden))
+        p = torch.diag_embed(p_diag)
+
+        # Omega: shared omega logic (base class heads)
+        if self.omega_mode == 'learnable':
+            omega_diag = self.softplus(self.head_omega_diag(hidden)) + 1e-6
+            omega = torch.diag_embed(omega_diag)
+        elif self.omega_mode == 'formula':
+            omega = self._compute_omega_formula(p_diag, sigma, tau=0.05)
+        elif self.omega_mode == 'hybrid':
+            omega = self._compute_omega_hybrid(p_diag, sigma, tau=0.05)
+        else:
+            raise ValueError(f"Unknown omega_mode: {self.omega_mode}")
+
+        return p, q, omega
+
+    def forward(self, x: torch.Tensor,
+                pi: torch.Tensor = None, sigma: torch.Tensor = None,
+                is_crisis: float = 0.0,
+                regime_probs: torch.Tensor = None,
+                macro_features: torch.Tensor = None,
+                dd_state: torch.Tensor = None) -> torch.Tensor:
+        """
+        Forward Pass (Dual-Shock Expert).
+
+        Args:
+            x: (B, Seq, Feat)
+            pi, sigma: optional prior mean / covariance
+            is_crisis: scalar float passed to CVaR layer
+            regime_probs: (B, R) HMM regime probabilities
+            macro_features: (B, macro_dim) for internal RegimeHead
+            dd_state: (B, 3) drawdown state
+
+        Returns:
+            weights: (B, N)  or  (weights, e2e_regime_probs) if e2e_regime=True
+        """
+        bs, _, _ = x.size()
+        device = x.device
+
+        # 0. sigma / pi estimation
+        if sigma is None:
+            asset_returns = x[:, :, :self.num_assets]
+            sigma = estimate_covariance(asset_returns, shrinkage=0.1)
+        if pi is None:
+            if 'asset_returns' not in locals():
+                asset_returns = x[:, :, :self.num_assets]
+            pi = asset_returns.mean(dim=1)
+
+        # 1. Shared encoding
+        hidden = self.encode(x)
+
+        # 1.5. Regime processing (mirrors BaseBLModel.forward)
+        e2e_regime_probs = None
+        if self.e2e_regime and hasattr(self, 'e2e_regime_head'):
+            e2e_regime_probs = self.e2e_regime_head(hidden)
+            regime_probs_for_model = e2e_regime_probs
+        else:
+            regime_probs_for_model = regime_probs
+
+        if hasattr(self, 'macro_regime_head') and macro_features is not None:
+            regime_probs_for_model = self.macro_regime_head(
+                hidden, macro_features=macro_features)
+
+        # 2. Gate probabilities: [hidden, regime] → softmax(3)
+        gate_parts = [hidden]
+        if self.regime_dim > 0:
+            if regime_probs_for_model is not None:
+                gate_parts.append(regime_probs_for_model)
+            else:
+                gate_parts.append(torch.zeros(bs, self.regime_dim,
+                                              device=device, dtype=hidden.dtype))
+        gate_logits = self.gate(torch.cat(gate_parts, dim=-1))  # (B, 3)
+        gate_probs = torch.softmax(gate_logits, dim=-1)          # (B, 3)
+
+        # 3. Per-expert BL → CVaR → weights
+        expert_weights = []
+        for i, name in enumerate(self.EXPERT_NAMES):
+            p, q, omega = self._get_expert_bl_params(
+                name, hidden, sigma, regime_probs_for_model, dd_state)
+
+            mu_bl, sigma_out = self.black_litterman_formula(
+                p, q, omega, pi, sigma)
+
+            lam = self.expert_lambda_risk[i].item()
+            w_i = self.opt_layer(mu_bl, sigma_out,
+                                 is_crisis=is_crisis, lambda_risk=lam)
+            expert_weights.append(w_i)
+
+        # 4. Blend experts
+        expert_stack = torch.stack(expert_weights, dim=1)   # (B, 3, N)
+        gate_expanded = gate_probs.unsqueeze(-1)             # (B, 3, 1)
+        weights = (gate_expanded * expert_stack).sum(dim=1)  # (B, N)
+
+        # 5. Crisis Overlay
+        if (self.regime_dim > 0
+                and regime_probs_for_model is not None
+                and hasattr(self, 'crisis_overlay')):
+            weights = self.crisis_overlay(weights, regime_probs_for_model)
+
+        # 6. E2E regime return
+        if self.e2e_regime and e2e_regime_probs is not None:
+            return weights, e2e_regime_probs
+
+        return weights
+
+
+# =============================================================================
+# 5. 모델 팩토리 함수
 # =============================================================================
 
 def get_model(model_type, input_dim, num_assets, device='cpu',
               omega_mode='learnable', sigma_mode='prior', lambda_risk=0.0,
               hidden_dim=64, regime_dim=0, macro_dim=0, max_bil_floor=0.5,
-              dist_type='t', t_df=5.0, e2e_regime=False):
+              dist_type='t', t_df=5.0, e2e_regime=False,
+              gate_hidden=16):
     """
-    모델 팩토리 함수 (v4: regime_dim, macro_dim, hidden_dim, max_bil_floor 지원).
+    모델 팩토리 함수 (v5: dual_shock_expert 추가).
     """
+    if model_type == 'dual_shock_expert':
+        # lambda_risk → expert lambda scale
+        # baseline lambda_risk=2.0 → scale=1.0 (기존 [1,3,5] 유지)
+        # lambda_risk=1.0 → scale=0.5 → [0.5, 1.5, 2.5] (공격적)
+        expert_scale = lambda_risk / 2.0 if lambda_risk > 0 else 1.0
+        return DualShockExpertModel(
+            input_dim=input_dim, num_assets=num_assets,
+            hidden_dim=hidden_dim,
+            omega_mode=omega_mode, sigma_mode=sigma_mode,
+            regime_dim=regime_dim if regime_dim > 0 else 4,
+            macro_dim=macro_dim, max_bil_floor=max_bil_floor,
+            dist_type=dist_type, t_df=t_df,
+            e2e_regime=e2e_regime,
+            gate_hidden=gate_hidden,
+            lambda_risk_scale=expert_scale,
+        ).to(device)
+
     model_map = {
         'lstm': LSTMModel, 'gru': GRUModel, 'tcn': TCNModel,
-        'transformer': TransformerModel, 'tft': TFTModel
+        'transformer': TransformerModel, 'tft': TFTModel,
     }
     if model_type not in model_map:
-        raise ValueError(f"Unknown model_type: {model_type}. Choose from {list(model_map.keys())}")
-    
+        raise ValueError(
+            f"Unknown model_type: {model_type}. "
+            f"Choose from {list(model_map.keys()) + ['dual_shock_expert']}"
+        )
+
     kwargs = dict(
         input_dim=input_dim, num_assets=num_assets, hidden_dim=hidden_dim,
-        omega_mode=omega_mode, sigma_mode=sigma_mode, lambda_risk=lambda_risk
+        omega_mode=omega_mode, sigma_mode=sigma_mode, lambda_risk=lambda_risk,
     )
     if model_type in ['gru', 'lstm']:
         kwargs['dist_type'] = dist_type
         kwargs['t_df'] = t_df
-        
+
     if model_type == 'gru' and regime_dim > 0:
         kwargs['regime_dim'] = regime_dim
         kwargs['macro_dim'] = macro_dim
         kwargs['max_bil_floor'] = max_bil_floor
         kwargs['e2e_regime'] = e2e_regime
-    
+
     return model_map[model_type](**kwargs).to(device)
 
 
