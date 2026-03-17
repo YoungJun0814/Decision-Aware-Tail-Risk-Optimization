@@ -149,63 +149,123 @@ guard_params = {
 
 ---
 
-## 4. 데이터 소스 및 파일 경로
+## 4. 디렉토리 구조 및 파일 경로
 
-> **서버:** RunPod — `root@203.57.40.132 -p 10048`
-> **Root:** `/workspace/`
+> **로컬 저장소 루트:** `Decision-Aware-Tail-Risk-Optimization/` (git repo)
+> **RunPod 서버:** `root@203.57.40.132 -p 10048` / `/workspace/` (로컬과 동일 구조로 다운로드 완료)
 
-### 4-1. 입력 데이터 (Weight & Return Files)
+### 4-1. 전체 디렉토리 구조
 
-| 파일 설명 | 경로 |
-|-----------|------|
-| R6 PIT-shifted 포트폴리오 가중치 | `results_runpod/phase17/step1_2025_repro_onepass_regimefix_v1/ExpA_R6_pit_shifted_weights.csv` |
-| R6 PIT-shifted 수익률 | `results_runpod/phase17/step1_2025_repro_onepass_regimefix_v1/ExpA_R6_pit_shifted_returns.csv` |
-| R6 raw 가중치 (fallback) | `results_runpod/phase17/step1_2025_repro_onepass_regimefix_v1/ExpA_R6_weights.csv` |
-| R6 raw 수익률 (fallback) | `results_runpod/phase17/step1_2025_repro_onepass_regimefix_v1/ExpA_R6_returns.csv` |
-| R7 PIT-shifted 가중치 | `results_runpod/phase17/step1_2025_repro_onepass_regimefix_v1/ExpA_R7_pit_shifted_weights.csv` |
-| R7 PIT-shifted 수익률 | `results_runpod/phase17/step1_2025_repro_onepass_regimefix_v1/ExpA_R7_pit_shifted_returns.csv` |
-| R7 raw 가중치 (fallback) | `results_runpod/phase17/step1_2025_repro_onepass_regimefix_v1/ExpA_R7_weights.csv` |
-| R7 raw 수익률 (fallback) | `results_runpod/phase17/step1_2025_repro_onepass_regimefix_v1/ExpA_R7_returns.csv` |
-| 일별 수익률 캐시 | `results_runpod/verify_triple/cache/daily_returns.csv` |
+```
+Decision-Aware-Tail-Risk-Optimization/
+│
+├── scripts/                                  # 실행 스크립트
+│   ├── run_phase18_paper_safe_ablation.py    # ★ 핵심 엔진: MarketContext, evaluate_returns 등
+│   ├── run_phase18_nonleveraged_v2_benchmark.py  # ★ 핵심 엔진: simulate_overlay_v2_strategy
+│   ├── run_correlation_guard_v7_exclusion.py # ★ Asset Exclusion Guard (최종 유효)
+│   ├── run_correlation_guard_v8_tiered.py    #   Tiered Guard (실험적)
+│   ├── run_correlation_guard_search.py       #   V1 원본 (버그 있음 — 참고용)
+│   ├── verify_guard_fine_search.py           #   Fine-grained 검색 (1,296 configs)
+│   ├── verify_guard_search_correct.py        #   초기 검색 (240 configs)
+│   ├── final_analysis.py                     #   Sub-period / Drawdown 최종 분석
+│   └── guard_analysis.py                     #   Guard 기여도 분해 분석
+│
+├── results_runpod/                           # RunPod 결과물 (로컬 다운로드 완료)
+│   │
+│   ├── correct_fine_guard_search.csv         # ★★ 핵심 결과: 1,296 configs, 406 Triple
+│   ├── correct_guard_search_results.csv      # ★  초기 검색: 240 configs, 13 Triple
+│   ├── all_guard_results_consolidated.csv    #    V1-V6 통합 (버그 있음 — 참고용만)
+│   │
+│   ├── correlation_guard_search_full/
+│   │   ├── guard_signals.csv                 # ★ SPY-TLT 상관/TLT vol 월별 신호 (114행)
+│   │   └── all_results.csv                   #   V1 전체 검색 결과 (289 configs, buggy)
+│   │
+│   ├── correlation_guard_v7/
+│   │   ├── all_results.csv                   #   V7 exclusion guard 결과 (16 configs)
+│   │   └── guard_signals.csv                 #   V7 guard 신호
+│   │
+│   ├── correlation_guard_v8/
+│   │   ├── all_results.csv                   #   V8 tiered guard 결과 (15 configs)
+│   │   └── guard_signals.csv                 #   V8 guard 신호
+│   │
+│   ├── phase17/
+│   │   └── step1_2025_repro_onepass_regimefix_v1/
+│   │       ├── ExpA_R6_pit_shifted_weights.csv   # ★ R6 PIT-shifted 가중치 (우선 사용)
+│   │       ├── ExpA_R6_pit_shifted_returns.csv   # ★ R6 PIT-shifted 수익률
+│   │       ├── ExpA_R6_weights.csv               #   R6 raw 가중치 (fallback)
+│   │       ├── ExpA_R6_returns.csv               #   R6 raw 수익률 (fallback)
+│   │       ├── ExpA_R7_pit_shifted_weights.csv   # ★ R7 PIT-shifted 가중치 (우선 사용)
+│   │       ├── ExpA_R7_pit_shifted_returns.csv   # ★ R7 PIT-shifted 수익률
+│   │       ├── ExpA_R7_weights.csv               #   R7 raw 가중치 (fallback)
+│   │       └── ExpA_R7_returns.csv               #   R7 raw 수익률 (fallback)
+│   │
+│   ├── walkforward/
+│   │   ├── summary.json                      #   Walk-forward 요약
+│   │   └── v4_port_returns.csv               #   V4 포트폴리오 월별 수익률
+│   │
+│   └── plots/
+│       └── comparison_v4.csv                 #   V4 비교 데이터
+│
+└── results/                                  # 로컬 smoke test 결과
+    ├── v5_smoke_dual/
+    │   ├── metrics.json
+    │   ├── summary.json
+    │   ├── fold_results.csv
+    │   ├── port_returns.csv
+    │   ├── port_weights.csv
+    │   ├── raw_weights.csv
+    │   └── asset_returns.csv
+    └── v5_smoke_gru/
+        ├── metrics.json
+        ├── summary.json
+        ├── fold_results.csv
+        ├── port_returns.csv
+        ├── port_weights.csv
+        ├── raw_weights.csv
+        └── asset_returns.csv
+```
 
-### 4-2. Guard Signal 파일
+### 4-2. 핵심 파일 상세 정보
 
-| 파일 설명 | 경로 |
-|-----------|------|
-| Guard 신호 (최종, corr_only) | `results_runpod/correlation_guard_search_full/guard_signals.csv` |
-| Guard 신호 (V7 exclusion 버전) | `results_runpod/correlation_guard_v7/guard_signals.csv` |
+#### 검색 결과 CSV
 
-**guard_signals.csv 컬럼:**
-- `index`: 월말 날짜 (month-end)
-- `spy_tlt_corr`: 60일 SPY-TLT 상관계수 (lagged, look-ahead bias 없음)
-- `tlt_vol`: 60일 TLT 실현 변동성
+| 파일 | 행수 | 크기 | 컬럼 | 용도 |
+|------|------|------|------|------|
+| `results_runpod/correct_fine_guard_search.csv` | 1,297 | 130KB | corr_thresh, base_bil, overlay_mods, exclude_set, sharpe, return, mdd, triple, guard_months | **★ 논문 핵심 결과** |
+| `results_runpod/correct_guard_search_results.csv` | 241 | 20KB | corr_thresh, base_bil, overlay_mods, sharpe, return, mdd, triple, guard_months | 초기 탐색 결과 |
+| `results_runpod/all_guard_results_consolidated.csv` | 2,645 | 579KB | label, corr_thresh, vol_thresh, base_bil, ..., triple, source | V1-V6 버그 결과 (참고용) |
 
-### 4-3. 검색 결과 파일
+#### Guard Signal CSV
 
-| 파일 설명 | 경로 | 크기 |
-|-----------|------|------|
-| **핵심: Fine-grained 검색 결과 (1,296 configs)** | `results_runpod/correct_fine_guard_search.csv` | 133KB |
-| 초기 정확 검색 결과 (240 configs) | `results_runpod/correct_guard_search_results.csv` | 21KB |
-| V1-V6 통합 결과 (2,644 configs, **버그 있음** — 참고용) | `results_runpod/all_guard_results_consolidated.csv` | 593KB |
-| V1 원본 결과 (buggy) | `results_runpod/correlation_guard_search/all_results.csv` |  |
-| V4 결과 (buggy) | `results_runpod/correlation_guard_v4/all_results.csv` |  |
-| V5 결과 (buggy) | `results_runpod/correlation_guard_v5/all_results.csv` |  |
-| V7 exclusion 결과 | `results_runpod/correlation_guard_v7/all_results.csv` |  |
-| V8 tiered 결과 | `results_runpod/correlation_guard_v8/all_results.csv` |  |
+| 파일 | 행수 | 컬럼 | 설명 |
+|------|------|------|------|
+| `results_runpod/correlation_guard_search_full/guard_signals.csv` | 115 | date, spy_tlt_corr, tlt_vol | **★ 60일 SPY-TLT 상관 월별 신호** (look-ahead bias 없음) |
+| `results_runpod/correlation_guard_v7/guard_signals.csv` | 115 | date, spy_tlt_corr, tlt_vol | V7 버전 신호 (동일) |
 
-### 4-4. 스크립트 파일
+#### 모델 입력 Weight/Return CSV
 
-| 파일 설명 | 경로 |
-|-----------|------|
-| **핵심 엔진: Market Context & 기본 함수** | `scripts/run_phase18_paper_safe_ablation.py` |
-| **핵심 엔진: Overlay V2 시뮬레이션** | `scripts/run_phase18_nonleveraged_v2_benchmark.py` |
-| **Guard V7: Asset Exclusion Guard (최종)** | `scripts/run_correlation_guard_v7_exclusion.py` |
-| Guard V8: Tiered Guard (실험적) | `scripts/run_correlation_guard_v8_tiered.py` |
-| 원본 Guard 검색 스크립트 (V1, buggy) | `scripts/run_correlation_guard_search.py` |
-| Fine-grained 검색 스크립트 | `scripts/verify_guard_fine_search.py` |
-| 초기 검색 스크립트 | `scripts/verify_guard_search_correct.py` |
-| 최종 분석 스크립트 | `scripts/final_analysis.py` |
-| Guard 기여도 분석 | `scripts/guard_analysis.py` |
+| 파일 | 설명 | 우선순위 |
+|------|------|---------|
+| `results_runpod/phase17/.../ExpA_R6_pit_shifted_weights.csv` | R6 PIT-shifted 가중치 (114×13) | 1순위 |
+| `results_runpod/phase17/.../ExpA_R6_pit_shifted_returns.csv` | R6 PIT-shifted 수익률 (114×1) | 1순위 |
+| `results_runpod/phase17/.../ExpA_R7_pit_shifted_weights.csv` | R7 PIT-shifted 가중치 (114×13) | 1순위 |
+| `results_runpod/phase17/.../ExpA_R7_pit_shifted_returns.csv` | R7 PIT-shifted 수익률 (114×1) | 1순위 |
+| `results_runpod/phase17/.../ExpA_R6_weights.csv` | R6 raw 가중치 | 2순위 (fallback) |
+| `results_runpod/phase17/.../ExpA_R7_weights.csv` | R7 raw 가중치 | 2순위 (fallback) |
+
+> `phase17/step1_2025_repro_onepass_regimefix_v1/` = 2025년 확장 데이터 포함 PIT-shifted 가중치.
+> 환경변수 `PHASE17_STEP1_DIR`로 경로 지정: `export PHASE17_STEP1_DIR=results_runpod/phase17/step1_2025_repro_onepass_regimefix_v1`
+
+#### 스크립트 파일
+
+| 파일 | 위치 | 역할 |
+|------|------|------|
+| `run_phase18_paper_safe_ablation.py` | 로컬+RunPod | ★ MarketContext 빌드, cosine_similarity, evaluate_returns, NEUTRAL_REGIME 등 기본 함수 |
+| `run_phase18_nonleveraged_v2_benchmark.py` | 로컬+RunPod | ★ simulate_overlay_v2_strategy, s3_factor_from_cfg, blend_sleeves_v2 등 overlay 엔진 |
+| `run_correlation_guard_v7_exclusion.py` | 로컬+RunPod | ★ simulate_with_exclusion_guard, compute_guard_signals (최종 유효 스크립트) |
+| `verify_guard_fine_search.py` | RunPod only | Fine-grained 검색 실행 (1,296 configs) |
+| `final_analysis.py` | 로컬+RunPod | Sub-period, drawdown, guard precision 분석 |
+| `guard_analysis.py` | RunPod only | Guard 기여도 분해 분석 |
 
 ---
 
