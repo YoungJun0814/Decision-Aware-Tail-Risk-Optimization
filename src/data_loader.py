@@ -650,16 +650,21 @@ def prepare_training_data(
     
     # 1. 자산 데이터 수집
     _, asset_returns = get_monthly_asset_data(active_tickers, start_date, end_date)
-    
+
+    # [FIX] yf.download()는 컬럼을 알파벳순으로 반환함.
+    # active_tickers 순서로 재정렬하여 y_tensor와 asset_names 순서를 일치시킴.
+    # 이렇게 해야 y_tensor[:, i]가 asset_names[i]의 수익률과 대응됨.
+    asset_returns = asset_returns[active_tickers]
+
     # 2. VIX 데이터 수집
     vix_data = get_vix_data(start_date, end_date)
-    
+
     # 3. 거시변수 데이터 수집
     macro_returns = get_macro_data(MACRO_TICKERS, start_date, end_date)
-    
+
     # 4. Regime 확률 데이터 수집
     regime_proba = get_regime_proba()
-    
+
     # 5. 데이터 병합
     if not macro_returns.empty:
         combined_data = pd.concat([asset_returns, macro_returns], axis=1).dropna()
@@ -808,12 +813,22 @@ def prepare_training_data(
         if not macro_df.empty:
             # y_dates(타겟 시점)에 맞춰 정렬
             macro_aligned = macro_df.reindex(y_dates).ffill().bfill()
-            # StandardScaler 정규화 (train 구간 기준)
-            n_train_macro = int(len(macro_aligned) * train_ratio)
-            macro_scaler = StandardScaler()
-            macro_scaler.fit(macro_aligned.values[:n_train_macro])
-            macro_scaled = macro_scaler.transform(macro_aligned.values)
-            macro_tensor = torch.tensor(macro_scaled, dtype=torch.float32)
+            if normalize:
+                # [LEGACY MODE] normalize=True일 때만 global 80% split으로 정규화
+                # walk-forward 훈련에서는 normalize=False로 호출하므로 이 분기는 사용되지 않음
+                n_train_macro = int(len(macro_aligned) * train_ratio)
+                macro_scaler = StandardScaler()
+                macro_scaler.fit(macro_aligned.values[:n_train_macro])
+                macro_scaled = macro_scaler.transform(macro_aligned.values)
+                macro_tensor = torch.tensor(macro_scaled, dtype=torch.float32)
+                print(f"[INFO] macro_tensor: global-normalized (train_ratio={train_ratio})")
+            else:
+                # [FIX] normalize=False (walk-forward mode): raw 값 반환
+                # train_fold() 내 per-fold 정규화(lines 336-348)에서 처리됨
+                # 기존 버그: global z-score 후 per-fold z-score → 이중 정규화로 look-ahead bias 발생
+                macro_tensor = torch.tensor(macro_aligned.values.astype(np.float32),
+                                            dtype=torch.float32)
+                print(f"[INFO] macro_tensor: raw (per-fold normalization in train_fold)")
             print(f"[INFO] macro_tensor shape: {macro_tensor.shape}")
         else:
             print("[WARNING] 매크로 데이터 수집 실패. macro_tensor=None")

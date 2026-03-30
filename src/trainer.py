@@ -8,6 +8,7 @@ Trainer Module
 - optimizer.zero_grad() -> loss.backward() -> optimizer.step() 흐름
 """
 
+import copy
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset, Sampler
@@ -358,6 +359,7 @@ class Trainer:
         """
         best_val_loss = float('inf')
         patience_counter = 0
+        best_state_dict = None
 
         # v5: Adaptive Lambda DD 기준값 저장 (초기 lambda_dd의 복원 하한)
         if self.path_mdd_loss_fn is not None and hasattr(self.loss_fn, 'lambda_dd'):
@@ -379,6 +381,11 @@ class Trainer:
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
                     patience_counter = 0
+                    best_state_dict = {
+                        k: v.clone().cpu()
+                        for k, v in self.model.state_dict().items()
+                        if not v.is_sparse and v.layout == torch.strided
+                    }
                 else:
                     patience_counter += 1
                     if patience_counter >= early_stopping_patience:
@@ -409,6 +416,9 @@ class Trainer:
                     msg += f" - PathMDD: {self._last_path_mdd:.4f} - λ_dd: {cur_ldd:.3f}"
                 print(msg)
         
+        if best_state_dict is not None:
+            self.model.load_state_dict(best_state_dict, strict=False)
+
         return {
             'train_losses': self.train_losses,
             'val_losses': self.val_losses,
@@ -725,8 +735,7 @@ class Phase2Trainer:
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
                     patience_counter = 0
-                    best_state = {k: v.clone() for k, v in 
-                                  self.model.state_dict().items()}
+                    best_state = copy.deepcopy(self.model.state_dict())
                 else:
                     patience_counter += 1
                     if patience_counter >= early_stopping_patience:

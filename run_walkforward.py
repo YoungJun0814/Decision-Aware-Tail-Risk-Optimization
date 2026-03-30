@@ -93,6 +93,16 @@ def parse_args():
                             "x5: DualShock+same. "
                             "x6: GRU+SharpeLoss+lambda_risk=0.5+no overlay (raw output)."
                         ))
+    parser.add_argument('--scaler-type', type=str, default='expanding',
+                        choices=['expanding', 'rolling5y', 'none'],
+                        help="Per-fold feature scaling mode.")
+    parser.add_argument('--pit_hmm', action='store_true',
+                        help="Explicit flag for PIT-safe regime (auto-selected when file exists).")
+    parser.add_argument('--label', type=str, default=None,
+                        help="Output file prefix label (e.g. R6_13_e2e). "
+                             "Files saved as <label>_port_returns.csv etc.")
+    parser.add_argument('--batch_size', type=int, default=None,
+                        help="Training batch size (overrides CONFIG default).")
     return parser.parse_args()
 
 # =============================================================================
@@ -151,6 +161,7 @@ CONFIG = {
     'assets_13': False,        # Phase7: 13-asset universe (TIPS, DBC, ACWX)
     'use_macro_regime': True,  # Phase5: macro → RegimeHead
     'macro_dim': 2,            # T10Y3M + BAA10Y
+    'scaler_type': 'expanding',
     
     # Walk-Forward
     'start_date': '2007-07-01',
@@ -216,6 +227,11 @@ def train_fold(X, y, y_raw, vix, regime_probs, fold, config, seed,
     
     train_idx = fold['train_idx']
     test_idx = fold['test_idx']
+
+    if hasattr(train_idx, 'tolist'):
+        train_idx = train_idx.tolist()
+    if hasattr(test_idx, 'tolist'):
+        test_idx = test_idx.tolist()
     
     # 데이터 분할
     X_train = X[train_idx]
@@ -237,6 +253,33 @@ def train_fold(X, y, y_raw, vix, regime_probs, fold, config, seed,
     n_train = len(X_train)
     n_val = max(int(n_train * 0.15), 1)
     n_actual_train = n_train - n_val
+
+    scaler_type = config.get('scaler_type', 'expanding')
+    if scaler_type != 'none':
+        _, _, num_features = X_train.shape
+        fit_slice = X_train[:n_actual_train]
+        if scaler_type == 'rolling5y' and fit_slice.shape[0] > 60:
+            fit_slice = fit_slice[-60:]
+
+        fit_target = fit_slice.reshape(-1, num_features)
+        mean_x = fit_target.mean(dim=0, keepdim=True)
+        std_x = fit_target.std(dim=0, keepdim=True)
+        std_x[std_x < 1e-8] = 1.0
+
+        X_train = (X_train - mean_x.unsqueeze(0)) / std_x.unsqueeze(0)
+        X_test = (X_test - mean_x.unsqueeze(0)) / std_x.unsqueeze(0)
+
+        if macro_train is not None:
+            macro_fit = macro_train[:n_actual_train]
+            if scaler_type == 'rolling5y' and macro_fit.shape[0] > 60:
+                macro_fit = macro_fit[-60:]
+
+            mean_m = macro_fit.mean(dim=0, keepdim=True)
+            std_m = macro_fit.std(dim=0, keepdim=True)
+            std_m[std_m < 1e-8] = 1.0
+
+            macro_train = (macro_train - mean_m) / std_m
+            macro_test = (macro_test - mean_m) / std_m
     
     # DataLoader (4-tuple or 5-tuple)
     if macro_train is not None:
@@ -585,6 +628,10 @@ def main():
     CONFIG['use_path_mdd'] = args.use_path_mdd
     CONFIG['train_verbose'] = args.train_verbose
     CONFIG['output_dir'] = args.output_dir
+    CONFIG['scaler_type'] = args.scaler_type
+    if args.batch_size is not None:
+        CONFIG['batch_size'] = args.batch_size
+    CONFIG['label'] = args.label
 
     # -------------------------------------------------------------------------
     # Experiment Presets (--exp)
@@ -706,6 +753,7 @@ def main():
     print(f"  E2E Regime:    {'ON' if args.e2e_regime else 'OFF'}")
     print(f"  EA-MIDAS:      {'ON' if CONFIG['use_ea_midas'] else 'OFF'}")
     print(f"  Assets:        {'13' if CONFIG['assets_13'] else '10'}")
+    print(f"  Scaler:        {CONFIG['scaler_type']}")
     print("=" * 70)
     
     # --- Config summary ---
@@ -740,7 +788,7 @@ def main():
         start_date=CONFIG['start_date'],
         end_date=CONFIG['end_date'],
         seq_length=CONFIG['seq_length'],
-        normalize=True,
+        normalize=False,
         use_momentum=CONFIG.get('use_momentum', False),
         use_correlation=CONFIG.get('use_correlation', False),
         use_macro_regime=CONFIG.get('use_macro_regime', False),
@@ -760,9 +808,9 @@ def main():
     print(f"\n  [DIAG] y_raw shape: {y_raw.shape}")
     print(f"  [DIAG] asset_returns_df columns: {list(asset_returns_df.columns)}")
     print(f"  [DIAG] asset_names from prepare: {asset_names}")
-    for i, col in enumerate(asset_returns_df.columns):
+    for i, name in enumerate(asset_names):
         col_data = y_raw[:, i]
-        print(f"  [DIAG] {col:>6s}: mean={col_data.mean():.5f}, std={col_data.std():.5f}, "
+        print(f"  [DIAG] {name:>6s}: mean={col_data.mean():.5f}, std={col_data.std():.5f}, "
               f"min={col_data.min():.5f}, max={col_data.max():.5f}")
     # 이상 감지: 월 평균 수익률 > 5%면 데이터 오류
     mean_monthly = np.abs(y_raw).mean()
@@ -946,6 +994,7 @@ def main():
     # --- Save OOS artifacts ---
     output_dir = CONFIG['output_dir']
     os.makedirs(output_dir, exist_ok=True)
+    label_prefix = f"{CONFIG['label']}_" if CONFIG.get('label') else ""
 
     all_test_dates = np.concatenate([dates[f['test_idx']] for f in folds])
     final_weights = final_ensemble if 'final_ensemble' in locals() else (
@@ -957,7 +1006,7 @@ def main():
         {'return': port_ret_series},
         index=pd.DatetimeIndex(all_test_dates, name='date'),
     )
-    port_ret_path = os.path.join(output_dir, 'port_returns.csv')
+    port_ret_path = os.path.join(output_dir, f'{label_prefix}port_returns.csv')
     port_ret_df.to_csv(port_ret_path)
     print(f"\n  OOS returns saved to {port_ret_path} ({len(port_ret_df)} months)")
 
@@ -966,7 +1015,7 @@ def main():
         index=pd.DatetimeIndex(all_test_dates, name='date'),
         columns=asset_names,
     )
-    port_weights_path = os.path.join(output_dir, 'port_weights.csv')
+    port_weights_path = os.path.join(output_dir, f'{label_prefix}port_weights.csv')
     port_weights_df.to_csv(port_weights_path)
     print(f"  OOS weights saved to {port_weights_path}")
 
@@ -975,7 +1024,7 @@ def main():
         index=pd.DatetimeIndex(all_test_dates, name='date'),
         columns=asset_names,
     )
-    raw_weights_path = os.path.join(output_dir, 'raw_weights.csv')
+    raw_weights_path = os.path.join(output_dir, f'{label_prefix}raw_weights.csv')
     raw_weights_df.to_csv(raw_weights_path)
     print(f"  OOS raw weights saved to {raw_weights_path}")
 
@@ -984,7 +1033,7 @@ def main():
         index=pd.DatetimeIndex(all_test_dates, name='date'),
         columns=asset_names,
     )
-    asset_returns_path = os.path.join(output_dir, 'asset_returns.csv')
+    asset_returns_path = os.path.join(output_dir, f'{label_prefix}asset_returns.csv')
     asset_ret_df.to_csv(asset_returns_path)
     print(f"  OOS asset returns saved to {asset_returns_path}")
 
@@ -1006,7 +1055,7 @@ def main():
         })
         offset += fold_len
 
-    fold_results_path = os.path.join(output_dir, 'fold_results.csv')
+    fold_results_path = os.path.join(output_dir, f'{label_prefix}fold_results.csv')
     pd.DataFrame(fold_rows).to_csv(fold_results_path, index=False)
     print(f"  Fold-level results saved to {fold_results_path}")
 
@@ -1038,7 +1087,7 @@ def main():
             'oos_end': '2025-12-31',
         },
     }
-    metrics_path = os.path.join(output_dir, 'metrics.json')
+    metrics_path = os.path.join(output_dir, f'{label_prefix}metrics.json')
     with open(metrics_path, 'w', encoding='utf-8') as f:
         json.dump(metrics_payload, f, indent=2)
 
@@ -1073,7 +1122,7 @@ def main():
         'fold_results': fold_rows,
     }
 
-    summary_path = os.path.join(output_dir, 'summary.json')
+    summary_path = os.path.join(output_dir, f'{label_prefix}summary.json')
     with open(summary_path, 'w', encoding='utf-8') as f:
         json.dump(summary, f, indent=2)
 

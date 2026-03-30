@@ -12,6 +12,8 @@ import torch.nn as nn
 import numpy as np
 from torch.distributions import StudentT
 
+CHOLESKY_JITTER = 1e-4
+
 # cvxpy 관련 import
 try:
     import cvxpy as cp
@@ -58,6 +60,7 @@ class CVaROptimizationLayer(nn.Module):
         self.safety_threshold = safety_threshold
         self.dist_type = dist_type
         self.t_df = t_df
+        self._fallback_count = 0
         
         self.cvxpy_layer = None
         
@@ -154,7 +157,7 @@ class CVaROptimizationLayer(nn.Module):
 
         # 1. 미분 가능한 샘플링: R = mu + L * eps
         # Cholesky 분해: Sigma = L * L^T
-        jit = 1e-6 * torch.eye(self.num_assets, device=device).expand(batch_size, -1, -1)
+        jit = CHOLESKY_JITTER * torch.eye(self.num_assets, device=device).expand(batch_size, -1, -1)
         try:
             L = torch.linalg.cholesky(sigma + jit)
         except RuntimeError:
@@ -181,15 +184,18 @@ class CVaROptimizationLayer(nn.Module):
             crisis_param = is_crisis 
             
         try:
-            # cvxpylayers 호출
-            weights, = self.cvxpy_layer(scenarios, crisis_param)
+            # cvxpylayers는 CPU 텐서만 지원 — GPU에서 호출 시 CPU로 이동 후 복원
+            if scenarios.is_cuda:
+                weights_cpu, = self.cvxpy_layer(
+                    scenarios.cpu(), crisis_param.cpu())
+                weights = weights_cpu.to(device)
+            else:
+                weights, = self.cvxpy_layer(scenarios, crisis_param)
         except Exception as e:
             # 최적화 실패 시 안전한 폴백: tempered softmax + equal-weight 블렌드
-            if not hasattr(self, '_fallback_count'):
-                self._fallback_count = 0
             self._fallback_count += 1
-            if self._fallback_count <= 3:  # 처음 3번만 로그
-                print(f"  [CVaR FALLBACK #{self._fallback_count}] Solver failed, using safe blend")
+            if self._fallback_count & (self._fallback_count - 1) == 0:  # 1, 2, 4, 8, ... 회차만 로그
+                print(f"  [CVaR FALLBACK #{self._fallback_count}] {str(e)[:80]}")
             
             equal_w = torch.ones_like(mu) / mu.size(1)
             soft_w = torch.softmax(mu / 0.1, dim=1)  # temperature=0.1으로 평탄화
@@ -200,6 +206,9 @@ class CVaROptimizationLayer(nn.Module):
         weights = weights / (weights.sum(dim=1, keepdim=True) + 1e-8)
             
         return weights
+
+    def get_fallback_stats(self) -> int:
+        return self._fallback_count
 
 
 # =============================================================================
@@ -280,6 +289,7 @@ class MeanCVaROptimizationLayer(nn.Module):
         self.safety_threshold = safety_threshold
         self.dist_type = dist_type
         self.t_df = t_df
+        self._fallback_count = 0
         
         self.cvxpy_layer = None
         
@@ -379,7 +389,7 @@ class MeanCVaROptimizationLayer(nn.Module):
             return torch.softmax(mu, dim=1)
         
         # 1. 시나리오 샘플링 (Reparameterization Trick)
-        jit = 1e-6 * torch.eye(self.num_assets, device=device).expand(batch_size, -1, -1)
+        jit = CHOLESKY_JITTER * torch.eye(self.num_assets, device=device).expand(batch_size, -1, -1)
         try:
             L = torch.linalg.cholesky(sigma + jit)
         except RuntimeError:
@@ -402,14 +412,17 @@ class MeanCVaROptimizationLayer(nn.Module):
             crisis_param = is_crisis
         
         try:
-            weights, = self.cvxpy_layer(adjusted_scenarios, crisis_param)
-        except Exception:
+            if adjusted_scenarios.is_cuda:
+                weights_cpu, = self.cvxpy_layer(
+                    adjusted_scenarios.cpu(), crisis_param.cpu())
+                weights = weights_cpu.to(device)
+            else:
+                weights, = self.cvxpy_layer(adjusted_scenarios, crisis_param)
+        except Exception as e:
             # 안전한 폴백: tempered softmax + equal-weight 블렌드
-            if not hasattr(self, '_fallback_count'):
-                self._fallback_count = 0
             self._fallback_count += 1
-            if self._fallback_count <= 3:
-                print(f"  [MeanCVaR FALLBACK #{self._fallback_count}] Solver failed, using safe blend")
+            if self._fallback_count & (self._fallback_count - 1) == 0:
+                print(f"  [MeanCVaR FALLBACK #{self._fallback_count}] {str(e)[:80]}")
             
             equal_w = torch.ones_like(mu) / mu.size(1)
             soft_w = torch.softmax(mu / 0.1, dim=1)
@@ -421,4 +434,5 @@ class MeanCVaROptimizationLayer(nn.Module):
         
         return weights
 
-
+    def get_fallback_stats(self) -> int:
+        return self._fallback_count

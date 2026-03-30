@@ -14,6 +14,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
+BL_SOLVER_JITTER = 1e-4
+
 # 최적화 레이어 및 헬퍼 함수 임포트
 from src.optimization import CVaROptimizationLayer, estimate_covariance
 
@@ -233,21 +235,25 @@ class BaseBLModel(nn.Module):
             sigma_out: (B, N, N) 최적화에 사용할 공분산 (sigma_mode에 따라 다름)
         """
         tau_sigma = tau * sigma
+        eye = torch.eye(self.num_assets, device=p.device)
+        eye_batch = eye.unsqueeze(0).expand_as(tau_sigma)
+        jitter = BL_SOLVER_JITTER * eye
+        jitter_batch = BL_SOLVER_JITTER * eye_batch
         
         try:
-            inv_tau_sigma = torch.inverse(tau_sigma + 1e-6 * torch.eye(self.num_assets, device=p.device))
-            inv_omega = torch.inverse(omega)
+            inv_tau_sigma = torch.linalg.solve(tau_sigma + jitter, eye_batch)
+            inv_omega = torch.linalg.solve(omega + jitter_batch, eye_batch)
         except RuntimeError:
-            inv_tau_sigma = torch.linalg.pinv(tau_sigma)
-            inv_omega = torch.linalg.pinv(omega)
+            inv_tau_sigma = torch.linalg.pinv(tau_sigma + jitter_batch)
+            inv_omega = torch.linalg.pinv(omega + jitter_batch)
 
         term_b = torch.bmm(p.transpose(1, 2), torch.bmm(inv_omega, p))
         post_precision = inv_tau_sigma + term_b
         
         try:
-            sigma_bl = torch.inverse(post_precision + 1e-6 * torch.eye(self.num_assets, device=p.device))
+            sigma_bl = torch.linalg.solve(post_precision + jitter_batch, eye_batch)
         except RuntimeError:
-            sigma_bl = torch.linalg.pinv(post_precision)
+            sigma_bl = torch.linalg.pinv(post_precision + jitter_batch)
 
         if pi.dim() == 2:
             pi = pi.unsqueeze(-1)
@@ -695,6 +701,9 @@ class RegimeFiLMGRU(nn.Module):
         eye = torch.eye(N, device=device)
         
         tau_sigma = tau * sigma
+        eye_batch = eye.unsqueeze(0).expand_as(tau_sigma)
+        jitter = BL_SOLVER_JITTER * eye
+        jitter_batch = BL_SOLVER_JITTER * eye_batch
         
         # A = (τΣ)^{-1} + P^T Ω^{-1} P
         # b = (τΣ)^{-1} π + P^T Ω^{-1} q
@@ -703,13 +712,13 @@ class RegimeFiLMGRU(nn.Module):
         try:
             # solve(A, b) = A^{-1} b — inverse보다 안정적
             inv_tau_sigma_pi = torch.linalg.solve(
-                tau_sigma + 1e-6 * eye, pi.unsqueeze(-1) if pi.dim() == 2 else pi)
-            inv_omega_p = torch.linalg.solve(omega + 1e-6 * eye, p)
-            inv_omega_q = torch.linalg.solve(omega + 1e-6 * eye, q)
+                tau_sigma + jitter, pi.unsqueeze(-1) if pi.dim() == 2 else pi)
+            inv_omega_p = torch.linalg.solve(omega + jitter_batch, p)
+            inv_omega_q = torch.linalg.solve(omega + jitter_batch, q)
         except RuntimeError:
             # Fallback 
-            inv_ts = torch.linalg.pinv(tau_sigma + 1e-6 * eye)
-            inv_o = torch.linalg.pinv(omega + 1e-6 * eye)
+            inv_ts = torch.linalg.pinv(tau_sigma + jitter_batch)
+            inv_o = torch.linalg.pinv(omega + jitter_batch)
             inv_tau_sigma_pi = torch.bmm(inv_ts, pi.unsqueeze(-1) if pi.dim() == 2 else pi)
             inv_omega_p = torch.bmm(inv_o, p)
             inv_omega_q = torch.bmm(inv_o, q)
@@ -719,9 +728,9 @@ class RegimeFiLMGRU(nn.Module):
         
         try:
             inv_ts_matrix = torch.linalg.solve(
-                tau_sigma + 1e-6 * eye, eye.expand_as(tau_sigma))
+                tau_sigma + jitter, eye_batch)
         except RuntimeError:
-            inv_ts_matrix = torch.linalg.pinv(tau_sigma + 1e-6 * eye)
+            inv_ts_matrix = torch.linalg.pinv(tau_sigma + jitter_batch)
             
         post_precision = inv_ts_matrix + pt_inv_omega_p
         
@@ -731,9 +740,9 @@ class RegimeFiLMGRU(nn.Module):
         
         # Solve for mu_bl
         try:
-            mu_bl = torch.linalg.solve(post_precision + 1e-6 * eye, rhs)
+            mu_bl = torch.linalg.solve(post_precision + jitter, rhs)
         except RuntimeError:
-            mu_bl = torch.bmm(torch.linalg.pinv(post_precision), rhs)
+            mu_bl = torch.bmm(torch.linalg.pinv(post_precision + jitter_batch), rhs)
         
         # Sigma output
         if self.sigma_mode == 'prior':
@@ -741,9 +750,9 @@ class RegimeFiLMGRU(nn.Module):
         elif self.sigma_mode == 'residual':
             try:
                 sigma_bl = torch.linalg.solve(
-                    post_precision + 1e-6 * eye, eye.expand_as(post_precision))
+                    post_precision + jitter, eye_batch)
             except RuntimeError:
-                sigma_bl = torch.linalg.pinv(post_precision)
+                sigma_bl = torch.linalg.pinv(post_precision + jitter_batch)
             sigma_out = sigma + self.lambda_blend * (sigma_bl - sigma.detach())
         else:
             sigma_out = sigma
@@ -1121,23 +1130,26 @@ def black_litterman_formula(p, q, omega, pi, sigma, tau=0.05, sigma_mode='prior'
     device = p.device
     
     tau_sigma = tau * sigma
-    eye = 1e-6 * torch.eye(num_assets, device=device)
+    eye = torch.eye(num_assets, device=device)
+    eye_batch = eye.unsqueeze(0).expand_as(tau_sigma)
+    jitter = BL_SOLVER_JITTER * eye
+    jitter_batch = BL_SOLVER_JITTER * eye_batch
     
     try:
-        inv_tau_sigma = torch.inverse(tau_sigma + eye)
-        inv_omega = torch.inverse(omega)
+        inv_tau_sigma = torch.linalg.solve(tau_sigma + jitter, eye_batch)
+        inv_omega = torch.linalg.solve(omega + jitter_batch, eye_batch)
     except RuntimeError:
-        inv_tau_sigma = torch.linalg.pinv(tau_sigma)
-        inv_omega = torch.linalg.pinv(omega)
+        inv_tau_sigma = torch.linalg.pinv(tau_sigma + jitter_batch)
+        inv_omega = torch.linalg.pinv(omega + jitter_batch)
     
     # 사후 정밀도 = (τΣ)^-1 + P^T Ω^-1 P
     term_b = torch.bmm(p.transpose(1, 2), torch.bmm(inv_omega, p))
     post_precision = inv_tau_sigma + term_b
     
     try:
-        sigma_bl = torch.inverse(post_precision + eye)
+        sigma_bl = torch.linalg.solve(post_precision + jitter_batch, eye_batch)
     except RuntimeError:
-        sigma_bl = torch.linalg.pinv(post_precision)
+        sigma_bl = torch.linalg.pinv(post_precision + jitter_batch)
     
     # 사후 기대수익률
     if pi.dim() == 2:
