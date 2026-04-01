@@ -26,18 +26,78 @@ Current final metrics:
 | Max drawdown | -9.4414% |
 | Bootstrap P(MDD >= -10%) | 57.98% |
 
+## Visual Overview
+
+### End-to-End Pipeline
+
+```mermaid
+flowchart LR
+    A["Market + Macro Data"] --> B["PIT Regime Build"]
+    B --> C["Walk-Forward Upstream Model"]
+    C --> D["R6 Sleeve"]
+    C --> E["R7 Sleeve"]
+    D --> F["Phase 18 Overlay"]
+    E --> F
+    F --> G["Structural Tournament"]
+    G --> H["Round 3 Promoted Winner"]
+    H --> I["Round 4 Overlay Search"]
+    I --> J["Current Thesis Champion"]
+```
+
+### Repository Structure
+
+```mermaid
+flowchart TD
+    A["Repo Root"] --> B["src/"]
+    A --> C["scripts/"]
+    A --> D["data/"]
+    A --> E["results_runpod/"]
+    A --> F["docs/"]
+    A --> G["run_walkforward.py"]
+    A --> H["README.md"]
+
+    B --> B1["data_loader.py"]
+    B --> B2["gen_regime_4state_pit.py"]
+    B --> B3["models.py"]
+    B --> B4["optimization.py"]
+    B --> B5["trainer.py"]
+    B --> B6["loss.py"]
+
+    C --> C1["run_phase18_nonleveraged_v2_benchmark.py"]
+    C --> C2["run_phase18_nonleveraged_v2_structural_tournament.py"]
+    C --> C3["run_nvidia_round0_freeze.py"]
+    C --> C4["run_nvidia_round1_kde_full_runpod.sh"]
+    C --> C5["run_nvidia_round2_turnover_runpod.sh"]
+    C --> C6["run_nvidia_round3_group_constraints_runpod.sh"]
+    C --> C7["run_nvidia_round4_mdd_reopt_runpod.sh"]
+
+    E --> E1["phase18_triple_precision_round3/"]
+    E --> E2["phase18_triple_verification/"]
+    E --> E3["nvidia_tournament_round3_group_constraints/"]
+    E --> E4["nvidia_tournament_round4_mdd_reopt/"]
+
+    F --> F1["THESIS_CURRENT_MODEL_PIPELINE.md"]
+    F --> F2["COMPLETE_MODEL_DOCUMENTATION.md"]
+    F --> F3["NVIDIA_INSPIRED_TOURNAMENT.md"]
+```
+
+### Winner Lineage
+
+```mermaid
+flowchart LR
+    A["Pre-NVIDIA Triple Champion"] --> B["Round 0 Freeze"]
+    B --> C["Round 1 KDE"]
+    C --> D["Round 2 Turnover Winner<br/>tov25"]
+    D --> E["Round 3 Group-Constraint Winner<br/>grp_eq60"]
+    E --> F["Round 4 MDD Re-opt"]
+    F --> G["Current Canonical Model"]
+```
+
 ## Start Here
 
 For the thesis-safe, end-to-end description of the current model, read:
 
 - `docs/THESIS_CURRENT_MODEL_PIPELINE.md`
-
-That document now includes Mermaid diagrams for:
-
-- repository structure
-- upstream model architecture
-- overlay execution flow
-- winner-survival lineage
 
 Additional project references:
 
