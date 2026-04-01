@@ -24,6 +24,22 @@ The current final model is the Round 3 promoted champion that survived Round 4 u
 - Round 4 evaluated seed snapshot:
   - `results_runpod/nvidia_tournament_round4_mdd_reopt/search/best_result.json`
 
+### 1.1 Visual Snapshot
+
+```mermaid
+flowchart LR
+    A["Market Data + Macro Data"] --> B["PIT Regime Build<br/>src/gen_regime_4state_pit.py"]
+    B --> C["Walk-Forward Upstream Training<br/>run_walkforward.py"]
+    C --> D["R6 Sleeve<br/>Transformer + BL + CVaR"]
+    C --> E["R7 Sleeve<br/>Transformer + BL + CVaR"]
+    D --> F["Phase 18 Overlay<br/>simulate_overlay_v2_strategy()"]
+    E --> F
+    F --> G["Structural Tournament<br/>run_phase18_nonleveraged_v2_structural_tournament.py"]
+    G --> H["Round 3 Promoted Winner<br/>grp_eq60_baseline"]
+    H --> I["Round 4 Overlay Search<br/>run_nvidia_round4_mdd_reopt_search.py"]
+    I --> J["Current Canonical Thesis Model<br/>Sharpe 1.0724 / Return 10.10% / MDD -9.44%"]
+```
+
 Current final metrics:
 
 | Metric | Value |
@@ -104,11 +120,66 @@ Promotion chain summary:
 | Round 3 winner | `grp_eq60_baseline` | `results_runpod/nvidia_tournament_round3_group_constraints/promoted_best_result.json` |
 | Round 4 winner | no change | `results_runpod/nvidia_tournament_round4_mdd_reopt/search/promotion_decision.json` |
 
+### 2.3 Winner Lineage Diagram
+
+```mermaid
+flowchart LR
+    A["Pre-NVIDIA Triple Champion<br/>phase18_triple_precision_round3"] --> B["Round 0 Frozen Baseline"]
+    B --> C["Round 1 KDE<br/>not promoted"]
+    C --> D["Round 2 Turnover<br/>tov25 / upstream_expert promoted"]
+    D --> E["Round 3 Group Constraint<br/>grp_eq60_baseline promoted"]
+    E --> F["Round 4 MDD Re-opt<br/>no promotion"]
+    F --> G["Current Thesis Champion<br/>grp_eq60 track"]
+```
+
 ---
 
 ## 3. Exact Files Run From Start To Finish
 
 This section lists the important files in chronological order, grouped by function.
+
+### 3.0 Repository Structure Diagram
+
+```mermaid
+flowchart TD
+    A["Decision-Aware-Tail-Risk-Optimization"] --> B["src/"]
+    A --> C["scripts/"]
+    A --> D["data/"]
+    A --> E["results/"]
+    A --> F["results_runpod/"]
+    A --> G["docs/"]
+    A --> H["run_walkforward.py"]
+    A --> I["README.md"]
+
+    B --> B1["data_loader.py"]
+    B --> B2["gen_regime_4state_pit.py"]
+    B --> B3["models.py"]
+    B --> B4["optimization.py"]
+    B --> B5["trainer.py"]
+    B --> B6["loss.py"]
+
+    C --> C1["run_phase18_nonleveraged_v2_benchmark.py"]
+    C --> C2["run_phase18_nonleveraged_v2_structural_tournament.py"]
+    C --> C3["run_nvidia_round0_freeze.py"]
+    C --> C4["run_nvidia_round1_kde_full_runpod.sh"]
+    C --> C5["run_nvidia_round2_turnover_runpod.sh"]
+    C --> C6["run_nvidia_round3_group_constraints_runpod.sh"]
+    C --> C7["run_nvidia_round4_mdd_reopt_runpod.sh"]
+    C --> C8["run_nvidia_round4_mdd_reopt_search.py"]
+
+    D --> D1["cache/"]
+    D --> D2["processed/regime_4state_pit.csv"]
+
+    F --> F1["phase18_triple_precision_round3/"]
+    F --> F2["phase18_triple_verification/"]
+    F --> F3["nvidia_tournament_round3_group_constraints/"]
+    F --> F4["nvidia_tournament_round4_mdd_reopt/"]
+
+    G --> G1["THESIS_CURRENT_MODEL_PIPELINE.md"]
+    G --> G2["COMPLETE_MODEL_DOCUMENTATION.md"]
+    G --> G3["NVIDIA_INSPIRED_TOURNAMENT.md"]
+    G --> G4["ROBUST_TRIPLE_STRATEGY.md"]
+```
 
 ### 3.1 Data And Regime Preparation
 
@@ -226,6 +297,23 @@ Important outputs:
 ## 4. Current Upstream Model Architecture
 
 The upstream model is a decision-aware Black-Litterman plus differentiable-CVaR network.
+
+### 4.0 Upstream Model Diagram
+
+```mermaid
+flowchart LR
+    A["12-Month Feature Window"] --> B["Transformer Encoder<br/>src/models.py"]
+    B --> C["Hidden State"]
+    C --> D["P Head<br/>asset selection"]
+    C --> E["Q Head<br/>return views"]
+    C --> F["Omega Head<br/>view uncertainty"]
+    D --> G["Black-Litterman Posterior"]
+    E --> G
+    F --> G
+    G --> H["Differentiable CVaR Layer<br/>src/optimization.py"]
+    H --> I["Raw Portfolio Weights"]
+    I --> J["Walk-Forward OOS Outputs<br/>R6 / R7 sleeves"]
+```
 
 ### 4.1 Data Domain
 
@@ -363,6 +451,23 @@ Primary file:
 Main function:
 
 - `simulate_overlay_v2_strategy(...)`
+
+### 5.0 Overlay Execution Diagram
+
+```mermaid
+flowchart LR
+    A["R6 Sleeve"] --> C["Sleeve Mixing"]
+    B["R7 Sleeve"] --> C
+    C --> D["Expert Scaling"]
+    D --> E["S3 Conviction"]
+    E --> F["SRB Regime Budget"]
+    F --> G["S1 Vol Targeting"]
+    G --> H["Sleeve / Tilt Allocation"]
+    H --> I["Policy Controller"]
+    I --> J["Stateful Stop-Loss"]
+    J --> K["Trading Cost Application"]
+    K --> L["Final Executed Weights + Returns"]
+```
 
 ### 5.1 Input Sleeves
 

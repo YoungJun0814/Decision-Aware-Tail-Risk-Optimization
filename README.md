@@ -32,6 +32,13 @@ For the thesis-safe, end-to-end description of the current model, read:
 
 - `docs/THESIS_CURRENT_MODEL_PIPELINE.md`
 
+That document now includes Mermaid diagrams for:
+
+- repository structure
+- upstream model architecture
+- overlay execution flow
+- winner-survival lineage
+
 Additional project references:
 
 - `docs/COMPLETE_MODEL_DOCUMENTATION.md`
