@@ -1,5 +1,7 @@
 # Decision-Aware Tail Risk Optimization: Complete Model Documentation
 
+> ⚠️ **Drift notice (2026-04-19).** This document references scripts and result directories that are not in the pushed repository (`gen_regime_4state_pit.py`, `regime_4state_pit.csv`, `run_phase18_nonleveraged_v2_*.py`, `phase18_triple_*`). See [`REPO_STATUS.md`](REPO_STATUS.md) for the authoritative existence table.
+
 > Triple Target Achievement Report
 > Sharpe 1.0838 | Annual Return 10.06% | Maximum Drawdown -9.996%
 > March 30, 2026

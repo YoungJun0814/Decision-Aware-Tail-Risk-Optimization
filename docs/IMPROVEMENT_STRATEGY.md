@@ -1,5 +1,7 @@
 # Strategic Improvement Plan: Maintaining Triple Target While Fixing Issues
 
+> ⚠️ **Drift notice (2026-04-19).** Assumes `regime_4state_pit.csv`, `gen_regime_4state_pit.py`, and `run_phase18_nonleveraged_v2_benchmark.py` exist; they do not in this repo. See [`REPO_STATUS.md`](REPO_STATUS.md). The forward-looking strategy is now tracked in [`REMEDIATION_PLAN.md`](REMEDIATION_PLAN.md).
+
 **Date:** 2026-03-30
 **Scope:** Full pipeline audit response — 11 issues identified, prioritized fixes with Triple Target preservation strategy
 

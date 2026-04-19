@@ -1,5 +1,7 @@
 # Decision-Aware Tail Risk Optimization
 
+> ⚠️ **Documentation status (2026-04-19).** Several files and result directories cited below (e.g. `results_runpod/nvidia_tournament_round3/`, `scripts/run_phase18_nonleveraged_v2_benchmark.py`, `data/processed/regime_4state_pit.csv`, `src/gen_regime_4state_pit.py`) **do not exist in this repository**. They were produced in a local workspace and were never pushed. The canonical metrics below are therefore **not reproducible from the pushed code alone**. See [`docs/REPO_STATUS.md`](docs/REPO_STATUS.md) for the authoritative existence table and [`docs/REMEDIATION_PLAN.md`](docs/REMEDIATION_PLAN.md) for the fix-forward plan.
+
 This repository contains a thesis-oriented portfolio construction pipeline that combines:
 
 - point-in-time regime estimation

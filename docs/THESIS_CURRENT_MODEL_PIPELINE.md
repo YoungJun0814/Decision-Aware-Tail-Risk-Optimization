@@ -1,5 +1,7 @@
 # Thesis Current Model Pipeline
 
+> ⚠️ **Drift notice (2026-04-19).** Many artifacts cited in this document (`gen_regime_4state_pit.py`, `regime_4state_pit.csv`, `nvidia_tournament_round3/4`, `phase18_triple_*`, `run_phase18_nonleveraged_v2_*.py`, `run_phase18_paper_safe_ablation.py`) **do not exist in the pushed repository**. Treat this file as a historical snapshot of intent, not a reproducible specification. See [`REPO_STATUS.md`](REPO_STATUS.md) for the authoritative existence table and [`REMEDIATION_PLAN.md`](REMEDIATION_PLAN.md) for the fix plan.
+
 Canonical reference for the model that should be described in the thesis as of 2026-04-01.
 
 This document is the project-level answer to four questions:

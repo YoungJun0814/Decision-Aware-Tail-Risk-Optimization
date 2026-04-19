@@ -56,6 +56,21 @@ def _load_module(name: str, path: Path):
     return mod
 
 
+# NOTE (2026-04-19): ENGINE_PATH and BENCHMARK_PATH point to Phase 18 overlay
+# scripts that are NOT present in this repository. They existed in the author's
+# local workspace but were never pushed. See docs/REPO_STATUS.md. Fail fast with
+# an actionable message rather than a cryptic spec-loader error.
+for _p in (ENGINE_PATH, BENCHMARK_PATH):
+    if not _p.exists():
+        raise FileNotFoundError(
+            f"Required Phase 18 overlay engine not found: {_p.name}\n"
+            f"  Expected at: {_p}\n"
+            "This script depends on run_phase18_paper_safe_ablation.py and "
+            "run_phase18_nonleveraged_v2_benchmark.py which are not pushed to "
+            "this repository. See docs/REPO_STATUS.md and "
+            "docs/REMEDIATION_PLAN.md for the fix-forward plan."
+        )
+
 psa = _load_module("phase18_paper_safe_engine", ENGINE_PATH)
 bench = _load_module("phase18_nonlev_v2_benchmark", BENCHMARK_PATH)
 

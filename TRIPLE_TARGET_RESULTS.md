@@ -2,6 +2,9 @@
 **Decision-Aware Tail Risk Optimization — Phase 18 + Correlation Guard**
 Generated: 2026-03-17
 
+> ⚠️ **Drift notice (2026-04-19).** The Phase 18 overlay engines referenced throughout (`run_phase18_paper_safe_ablation.py`, `run_phase18_nonleveraged_v2_benchmark.py`) are not present in this repository. Any end-to-end reproduction attempt will fail at import. See [`docs/REPO_STATUS.md`](docs/REPO_STATUS.md).
+
+
 ---
 
 ## 1. 핵심 결과 요약
