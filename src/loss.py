@@ -28,15 +28,22 @@ import torch.nn.functional as F
 class DecisionAwareLoss(nn.Module):
     """
     Decision-Aware Loss Function (v2)
-    
-    프로젝트 정의서의 Loss Function을 구현합니다:
-    
-    Loss = -Return + η × Risk + κ(VIX) × Turnover
-    
-    Args:
-        eta (float): 리스크(Risk) 페널티 가중치. 기본값 1.0
-        kappa_base (float): 거래비용 기본 계수. 기본값 0.001
-        kappa_vix_scale (float): VIX에 따른 거래비용 스케일링 계수. 기본값 0.0001
+
+    Loss = -Return + η × Risk + κ(VIX) × Turnover + λ_dd × DD
+
+    ``risk_type`` options:
+      - ``'std'``: portfolio-return standard deviation within the mini-batch.
+      - ``'downside_deviation'`` (default): sqrt of mean squared negative
+        deviation from the batch mean.
+      - ``'batch_tail_mean'``: mean of the worst α=5% portfolio returns
+        **within the current mini-batch**. This is NOT the distributional
+        CVaR used by ``src/optimization.CVaROptimizationLayer`` (which is a
+        Rockafellar-Uryasev LP over sampled scenarios). It is a per-batch
+        tail-loss proxy that only converges to distributional CVaR in the
+        limit of large, stationary, i.i.d. batches. Reported separately
+        from optimizer-level CVaR to avoid confusion.
+      - ``'cvar'``: deprecated alias for ``'batch_tail_mean'``; emits a
+        DeprecationWarning on first use.
     """
     
 
@@ -126,17 +133,30 @@ class DecisionAwareLoss(nn.Module):
             # 1. Standard Deviation (변동성)
             risk_penalty = portfolio_returns.std() + 1e-8
             
-        elif self.risk_type == 'cvar':
-            # 2. CVaR (Conditional Value at Risk) - 95%
-            # 배치 내 수익률을 정렬하여 하위 5%의 평균 손실 계산
+        elif self.risk_type in ('batch_tail_mean', 'cvar'):
+            # Batch tail-loss proxy (NOT distributional CVaR).
+            # Mean of the worst α=5% portfolio returns inside the current
+            # mini-batch. Only consistent with Rockafellar-Uryasev CVaR
+            # in the large-batch, stationary, i.i.d. limit.
+            if self.risk_type == 'cvar' and not getattr(
+                    self, '_cvar_alias_warned', False):
+                import warnings
+                warnings.warn(
+                    "risk_type='cvar' in DecisionAwareLoss is a batch tail-loss "
+                    "proxy, not the distributional CVaR used by the optimizer. "
+                    "Use risk_type='batch_tail_mean' to make this explicit.",
+                    DeprecationWarning, stacklevel=2,
+                )
+                self._cvar_alias_warned = True
+
             alpha = 0.05
             k = int(batch_size * alpha)
-            if k < 1: k = 1 # 최소 1개 샘플 보장
-            
+            if k < 1:
+                k = 1  # guarantee at least one sample
+
             sorted_returns, _ = torch.sort(portfolio_returns)
             worst_returns = sorted_returns[:k]
-            cvar = -worst_returns.mean() # 손실이므로 음수 -> 양수로 변환
-            risk_penalty = cvar
+            risk_penalty = -worst_returns.mean()  # loss is negative → flip sign
             
         else: # 'downside_deviation' (Default)
             # 3. Downside Deviation (하방 편차)
