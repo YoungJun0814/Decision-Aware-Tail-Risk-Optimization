@@ -98,6 +98,14 @@ def parse_args():
                         help="Per-fold feature scaling mode.")
     parser.add_argument('--pit_hmm', action='store_true',
                         help="Explicit flag for PIT-safe regime (auto-selected when file exists).")
+    parser.add_argument('--nested', action='store_true',
+                        help="Enable nested walk-forward CV (P1.3). Overlay and "
+                             "loss hyperparameters are tuned on inner folds only; "
+                             "outer test window is never seen by the tuner. "
+                             "Currently logs the split plan; full tuner integration "
+                             "is phased in. See src/cv/nested.py.")
+    parser.add_argument('--n-inner-folds', type=int, default=3,
+                        help="Inner folds per outer fold when --nested is set.")
     parser.add_argument('--label', type=str, default=None,
                         help="Output file prefix label (e.g. R6_13_e2e). "
                              "Files saved as <label>_port_returns.csv etc.")
@@ -868,6 +876,25 @@ def main():
         print(f"    Fold {i+1}: train={len(f['train_idx'])}, "
               f"test={len(f['test_idx'])}, "
               f"period={f['test_start'].date()} ~ {f['test_end'].date()}")
+
+    # --- P1.3: nested CV scaffolding --------------------------------------
+    # Hyperparameters tuned on outer test windows bias the reported metric.
+    # --nested prints the leakage-free inner/outer split plan so that
+    # downstream tuners can consume it via src.cv.make_nested_walkforward.
+    # Full trainer wiring is staged; the plan itself is printed now.
+    if getattr(args, 'nested', False):
+        from src.cv import make_nested_walkforward
+        from src.cv.nested import describe
+        oos_start_idx = int(folds[0]['test_idx'][0])
+        nested_plan = make_nested_walkforward(
+            n_obs=len(dates),
+            oos_start_idx=oos_start_idx,
+            test_window=CONFIG.get('test_window_months', 24),
+            n_inner=int(getattr(args, 'n_inner_folds', 3)),
+        )
+        print("\n[P1.3] Nested walk-forward plan (tuner must ignore outer test):")
+        print(describe(nested_plan))
+        print("  Outer test windows stay untouched by hyperparameter tuning.")
     
     # --- Multi-seed Walk-Forward ---
     all_seed_results = []
