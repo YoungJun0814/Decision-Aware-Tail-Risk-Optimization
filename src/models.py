@@ -359,9 +359,11 @@ class BaseBLModel(nn.Module):
 class LSTMModel(BaseBLModel):
     def __init__(self, input_dim, num_assets, hidden_dim=64, num_layers=2, dropout=0.2,
                  omega_mode='learnable', sigma_mode='prior', lambda_risk=0.0,
-                 dist_type='t', t_df=5.0):
-        super().__init__(input_dim, num_assets, hidden_dim, dropout, omega_mode, sigma_mode, lambda_risk,
-                         dist_type=dist_type, t_df=t_df)
+                 regime_dim=0, macro_dim=0, max_bil_floor=0.5,
+                 dist_type='t', t_df=5.0, e2e_regime=False):
+        super().__init__(input_dim, num_assets, hidden_dim, dropout, omega_mode, sigma_mode,
+                         lambda_risk, regime_dim, macro_dim, max_bil_floor,
+                         dist_type=dist_type, t_df=t_df, e2e_regime=e2e_regime)
         self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True, dropout=dropout if num_layers > 1 else 0)
     
     def encode(self, x):
@@ -383,8 +385,12 @@ class GRUModel(BaseBLModel):
 
 class TCNModel(BaseBLModel):
     def __init__(self, input_dim, num_assets, hidden_dim=64, start_kernel_size=3, dropout=0.2,
-                 omega_mode='learnable', sigma_mode='prior', lambda_risk=0.0):
-        super().__init__(input_dim, num_assets, hidden_dim, dropout, omega_mode, sigma_mode, lambda_risk)
+                 omega_mode='learnable', sigma_mode='prior', lambda_risk=0.0,
+                 regime_dim=0, macro_dim=0, max_bil_floor=0.5,
+                 dist_type='t', t_df=5.0, e2e_regime=False):
+        super().__init__(input_dim, num_assets, hidden_dim, dropout, omega_mode, sigma_mode,
+                         lambda_risk, regime_dim, macro_dim, max_bil_floor,
+                         dist_type=dist_type, t_df=t_df, e2e_regime=e2e_regime)
         self.tcn = nn.Sequential(
             nn.Conv1d(input_dim, hidden_dim, kernel_size=start_kernel_size, padding=start_kernel_size//2),
             nn.ReLU(),
@@ -399,8 +405,12 @@ class TCNModel(BaseBLModel):
 
 class TransformerModel(BaseBLModel):
     def __init__(self, input_dim, num_assets, hidden_dim=64, num_layers=2, nhead=4, dropout=0.2,
-                 omega_mode='learnable', sigma_mode='prior', lambda_risk=0.0):
-        super().__init__(input_dim, num_assets, hidden_dim, dropout, omega_mode, sigma_mode, lambda_risk)
+                 omega_mode='learnable', sigma_mode='prior', lambda_risk=0.0,
+                 regime_dim=0, macro_dim=0, max_bil_floor=0.5,
+                 dist_type='t', t_df=5.0, e2e_regime=False):
+        super().__init__(input_dim, num_assets, hidden_dim, dropout, omega_mode, sigma_mode,
+                         lambda_risk, regime_dim, macro_dim, max_bil_floor,
+                         dist_type=dist_type, t_df=t_df, e2e_regime=e2e_regime)
         self.input_proj = nn.Linear(input_dim, hidden_dim)
         encoder_layer = nn.TransformerEncoderLayer(d_model=hidden_dim, nhead=nhead, dim_feedforward=hidden_dim*4, dropout=dropout, batch_first=True)
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
@@ -462,8 +472,12 @@ class VariableSelectionNetwork(nn.Module):
 
 class TFTModel(BaseBLModel):
     def __init__(self, input_dim, num_assets, hidden_dim=64, num_layers=2, nhead=4, dropout=0.2,
-                 omega_mode='learnable', sigma_mode='prior', lambda_risk=0.0):
-        super().__init__(input_dim, num_assets, hidden_dim, dropout, omega_mode, sigma_mode, lambda_risk)
+                 omega_mode='learnable', sigma_mode='prior', lambda_risk=0.0,
+                 regime_dim=0, macro_dim=0, max_bil_floor=0.5,
+                 dist_type='t', t_df=5.0, e2e_regime=False):
+        super().__init__(input_dim, num_assets, hidden_dim, dropout, omega_mode, sigma_mode,
+                         lambda_risk, regime_dim, macro_dim, max_bil_floor,
+                         dist_type=dist_type, t_df=t_df, e2e_regime=e2e_regime)
         
         self.vsn = VariableSelectionNetwork(1, input_dim, hidden_dim, dropout)
         self.lstm_encoder = nn.LSTM(hidden_dim, hidden_dim, num_layers, batch_first=True)
