@@ -111,8 +111,17 @@ class CVaROptimizationLayer(nn.Module):
             print(f"[INFO] CVaR Layer initialized: {num_assets} assets, {num_scenarios} scenarios, dist={dist_type}(df={t_df})")
 
     def _sample_noise(self, shape, device):
-        """시나리오 노이즈 샘플링: Normal 또는 Student-T."""
+        """시나리오 노이즈 샘플링: Normal 또는 Student-T.
+
+        ``self.t_df`` can be either a Python scalar (legacy path) or a
+        torch.Tensor of shape () / (B,) — in the tensor case we route
+        through ``sample_unit_t`` so gradients propagate into the df
+        parameter (used by P2.2's RegimeAdaptiveTDf module).
+        """
         if self.dist_type == 't':
+            if torch.is_tensor(self.t_df):
+                from src.regime_t_df import sample_unit_t
+                return sample_unit_t(shape, self.t_df, device=device)
             t_dist = StudentT(df=self.t_df)
             eps = t_dist.sample(shape).to(device)
             # t(df)의 분산 = df/(df-2) → 정규화하여 단위 분산 유지

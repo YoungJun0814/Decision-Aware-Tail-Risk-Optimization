@@ -26,7 +26,7 @@ from src.data_loader import (
     get_regime_4state, ASSET_TICKERS,
 )
 from src.models import get_model
-from src.loss import DecisionAwareLoss, PathAwareMDDLoss, SharpeLoss
+from src.loss import DecisionAwareLoss, PathAwareMDDLoss, SoftPathMDDLoss, SharpeLoss
 from src.trainer import Trainer, TrajectoryBatchSampler
 from src.utils import set_seed, get_device, calculate_mdd
 
@@ -79,6 +79,25 @@ def parse_args():
                         help="Realized trading cost charged directly in the loss (bps).")
     parser.add_argument('--use-path-mdd', action='store_true',
                         help="Enable PathAwareMDDLoss-driven adaptive lambda_dd updates.")
+    parser.add_argument('--soft-mdd', action='store_true',
+                        help="Use SoftPathMDDLoss (differentiable logsumexp surrogate, "
+                             "P1.4) instead of the hard-max PathAwareMDDLoss. Implies "
+                             "--use-path-mdd.")
+    parser.add_argument('--soft-mdd-beta', type=float, default=40.0,
+                        help="Sharpness of the soft-MDD logsumexp surrogate (default 40).")
+    parser.add_argument('--learnable-t-df', action='store_true',
+                        help="Enable RegimeAdaptiveTDf (P2.2): per-regime learnable "
+                             "Student-T df. Requires --dist_type=t and regime_dim>0.")
+    parser.add_argument('--t-df-prior', type=str, default=None,
+                        help="Comma-separated prior df per regime (e.g. '3,5,7,10'). "
+                             "Defaults to [3,5,7,10][:regime_dim].")
+    parser.add_argument('--group-masks', type=str, default=None,
+                        help="Path to a CSV of group masks (K x N, 0/1). Enables "
+                             "P2.1 group constraints inside the CVaR optimizer.")
+    parser.add_argument('--group-caps', type=str, default=None,
+                        help="Comma-separated upper bounds (length K) for group masks.")
+    parser.add_argument('--group-floors', type=str, default=None,
+                        help="Comma-separated lower bounds (length K) for group masks.")
     parser.add_argument('--train-verbose', action='store_true',
                         help="Print epoch-level training logs.")
     parser.add_argument('--output-dir', type=str, default='results/walkforward',
@@ -346,6 +365,12 @@ def train_fold(X, y, y_raw, vix, regime_probs, fold, config, seed,
         dist_type=config.get('dist_type', 't'),
         t_df=config.get('t_df', 5.0),
         e2e_regime=config.get('e2e_regime', False),
+        # P2.1 / P2.2 wiring — all optional, default to legacy behaviour.
+        group_masks=config.get('group_masks'),
+        group_caps=config.get('group_caps'),
+        group_floors=config.get('group_floors'),
+        learnable_t_df=config.get('learnable_t_df', False),
+        t_df_prior=config.get('t_df_prior'),
     )
     
     # Loss — SharpeLoss (x1/x3) or DecisionAwareLoss (baseline/x2)
@@ -370,11 +395,20 @@ def train_fold(X, y, y_raw, vix, regime_probs, fold, config, seed,
 
     path_mdd_fn = None
     if config.get('use_path_mdd', False):
-        path_mdd_fn = PathAwareMDDLoss(
-            mdd_target=-0.10,
-            mdd_lambda=5.0,
-            soft_margin=0.02,
-        )
+        if config.get('soft_mdd', False):
+            # P1.4: differentiable surrogate.
+            path_mdd_fn = SoftPathMDDLoss(
+                mdd_target=-0.10,
+                mdd_lambda=5.0,
+                soft_margin=0.02,
+                beta=config.get('soft_mdd_beta', 40.0),
+            )
+        else:
+            path_mdd_fn = PathAwareMDDLoss(
+                mdd_target=-0.10,
+                mdd_lambda=5.0,
+                soft_margin=0.02,
+            )
     
     # Optimizer — v4: weight_decay 추가
     optimizer = optim.Adam(
@@ -633,7 +667,20 @@ def main():
     if args.max_bil_floor is not None:
         CONFIG['max_bil_floor'] = args.max_bil_floor
     CONFIG['realized_cost_bps'] = args.realized_cost_bps
-    CONFIG['use_path_mdd'] = args.use_path_mdd
+    CONFIG['use_path_mdd'] = args.use_path_mdd or args.soft_mdd
+    CONFIG['soft_mdd'] = args.soft_mdd
+    CONFIG['soft_mdd_beta'] = args.soft_mdd_beta
+    CONFIG['learnable_t_df'] = args.learnable_t_df
+    if args.t_df_prior:
+        CONFIG['t_df_prior'] = [float(x) for x in args.t_df_prior.split(',')]
+    if args.group_masks:
+        import pandas as _pd
+        _gm = _pd.read_csv(args.group_masks, header=None).values.astype(float)
+        CONFIG['group_masks'] = _gm
+    if args.group_caps:
+        CONFIG['group_caps'] = [float(x) for x in args.group_caps.split(',')]
+    if args.group_floors:
+        CONFIG['group_floors'] = [float(x) for x in args.group_floors.split(',')]
     CONFIG['train_verbose'] = args.train_verbose
     CONFIG['output_dir'] = args.output_dir
     CONFIG['scaler_type'] = args.scaler_type

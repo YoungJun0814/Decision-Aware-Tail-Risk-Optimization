@@ -46,7 +46,10 @@ class BaseBLModel(nn.Module):
                  lambda_risk: float = 0.0, regime_dim: int = 0,
                  macro_dim: int = 0, max_bil_floor: float = 0.5,
                  dist_type: str = 't', t_df: float = 5.0,
-                 e2e_regime: bool = False):
+                 e2e_regime: bool = False,
+                 group_masks=None, group_caps=None, group_floors=None,
+                 learnable_t_df: bool = False,
+                 t_df_prior=None):
         super(BaseBLModel, self).__init__()
         self.num_assets = num_assets
         self.dropout = dropout
@@ -120,8 +123,18 @@ class BaseBLModel(nn.Module):
             bil_index=num_assets - 1,  # BIL = 마지막 자산 (10→idx9, 13→idx12)
             safety_threshold=0.5,
             dist_type=dist_type,
-            t_df=t_df
+            t_df=t_df,
+            group_masks=group_masks,
+            group_caps=group_caps,
+            group_floors=group_floors,
         )
+
+        # --- P2.2: learnable per-regime Student-T df (optional) ------------
+        self.regime_t_df = None
+        if learnable_t_df and regime_dim > 0 and dist_type == 't':
+            from src.regime_t_df import RegimeAdaptiveTDf
+            prior = t_df_prior if t_df_prior is not None else [3.0, 5.0, 7.0, 10.0][:regime_dim]
+            self.regime_t_df = RegimeAdaptiveTDf(prior_df=prior)
 
     def get_bl_parameters(self, hidden_features: torch.Tensor, sigma: torch.Tensor = None,
                           regime_probs: torch.Tensor = None,
@@ -333,7 +346,13 @@ class BaseBLModel(nn.Module):
         
         # 3. Black-Litterman 공식
         mu_bl, sigma_out = self.black_litterman_formula(p, q, omega, pi, sigma)
-        
+
+        # P2.2: regime-adaptive learnable t_df. When enabled, compute the
+        # effective df per sample from the regime probabilities and push it
+        # into the optimisation layer for gradient-propagating sampling.
+        if self.regime_t_df is not None and regime_probs_for_model is not None:
+            self.opt_layer.t_df = self.regime_t_df(regime_probs_for_model)
+
         # 4. CVaR 최적화
         weights = self.opt_layer(mu_bl, sigma_out, is_crisis=is_crisis,
                                   lambda_risk=self.lambda_risk)
@@ -360,10 +379,10 @@ class LSTMModel(BaseBLModel):
     def __init__(self, input_dim, num_assets, hidden_dim=64, num_layers=2, dropout=0.2,
                  omega_mode='learnable', sigma_mode='prior', lambda_risk=0.0,
                  regime_dim=0, macro_dim=0, max_bil_floor=0.5,
-                 dist_type='t', t_df=5.0, e2e_regime=False):
+                 dist_type='t', t_df=5.0, e2e_regime=False, **kwargs):
         super().__init__(input_dim, num_assets, hidden_dim, dropout, omega_mode, sigma_mode,
                          lambda_risk, regime_dim, macro_dim, max_bil_floor,
-                         dist_type=dist_type, t_df=t_df, e2e_regime=e2e_regime)
+                         dist_type=dist_type, t_df=t_df, e2e_regime=e2e_regime, **kwargs)
         self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True, dropout=dropout if num_layers > 1 else 0)
     
     def encode(self, x):
@@ -373,10 +392,11 @@ class LSTMModel(BaseBLModel):
 class GRUModel(BaseBLModel):
     def __init__(self, input_dim, num_assets, hidden_dim=64, num_layers=2, dropout=0.2,
                  omega_mode='learnable', sigma_mode='prior', lambda_risk=0.0, regime_dim=0,
-                 macro_dim=0, max_bil_floor=0.5, dist_type='t', t_df=5.0, e2e_regime=False):
-        super().__init__(input_dim, num_assets, hidden_dim, dropout, omega_mode, sigma_mode, 
+                 macro_dim=0, max_bil_floor=0.5, dist_type='t', t_df=5.0, e2e_regime=False,
+                 **kwargs):
+        super().__init__(input_dim, num_assets, hidden_dim, dropout, omega_mode, sigma_mode,
                          lambda_risk, regime_dim, macro_dim, max_bil_floor, dist_type=dist_type, t_df=t_df,
-                         e2e_regime=e2e_regime)
+                         e2e_regime=e2e_regime, **kwargs)
         self.gru = nn.GRU(input_dim, hidden_dim, num_layers, batch_first=True, dropout=dropout if num_layers > 1 else 0)
     
     def encode(self, x):
@@ -387,10 +407,10 @@ class TCNModel(BaseBLModel):
     def __init__(self, input_dim, num_assets, hidden_dim=64, start_kernel_size=3, dropout=0.2,
                  omega_mode='learnable', sigma_mode='prior', lambda_risk=0.0,
                  regime_dim=0, macro_dim=0, max_bil_floor=0.5,
-                 dist_type='t', t_df=5.0, e2e_regime=False):
+                 dist_type='t', t_df=5.0, e2e_regime=False, **kwargs):
         super().__init__(input_dim, num_assets, hidden_dim, dropout, omega_mode, sigma_mode,
                          lambda_risk, regime_dim, macro_dim, max_bil_floor,
-                         dist_type=dist_type, t_df=t_df, e2e_regime=e2e_regime)
+                         dist_type=dist_type, t_df=t_df, e2e_regime=e2e_regime, **kwargs)
         self.tcn = nn.Sequential(
             nn.Conv1d(input_dim, hidden_dim, kernel_size=start_kernel_size, padding=start_kernel_size//2),
             nn.ReLU(),
@@ -407,10 +427,10 @@ class TransformerModel(BaseBLModel):
     def __init__(self, input_dim, num_assets, hidden_dim=64, num_layers=2, nhead=4, dropout=0.2,
                  omega_mode='learnable', sigma_mode='prior', lambda_risk=0.0,
                  regime_dim=0, macro_dim=0, max_bil_floor=0.5,
-                 dist_type='t', t_df=5.0, e2e_regime=False):
+                 dist_type='t', t_df=5.0, e2e_regime=False, **kwargs):
         super().__init__(input_dim, num_assets, hidden_dim, dropout, omega_mode, sigma_mode,
                          lambda_risk, regime_dim, macro_dim, max_bil_floor,
-                         dist_type=dist_type, t_df=t_df, e2e_regime=e2e_regime)
+                         dist_type=dist_type, t_df=t_df, e2e_regime=e2e_regime, **kwargs)
         self.input_proj = nn.Linear(input_dim, hidden_dim)
         encoder_layer = nn.TransformerEncoderLayer(d_model=hidden_dim, nhead=nhead, dim_feedforward=hidden_dim*4, dropout=dropout, batch_first=True)
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
@@ -474,10 +494,10 @@ class TFTModel(BaseBLModel):
     def __init__(self, input_dim, num_assets, hidden_dim=64, num_layers=2, nhead=4, dropout=0.2,
                  omega_mode='learnable', sigma_mode='prior', lambda_risk=0.0,
                  regime_dim=0, macro_dim=0, max_bil_floor=0.5,
-                 dist_type='t', t_df=5.0, e2e_regime=False):
+                 dist_type='t', t_df=5.0, e2e_regime=False, **kwargs):
         super().__init__(input_dim, num_assets, hidden_dim, dropout, omega_mode, sigma_mode,
                          lambda_risk, regime_dim, macro_dim, max_bil_floor,
-                         dist_type=dist_type, t_df=t_df, e2e_regime=e2e_regime)
+                         dist_type=dist_type, t_df=t_df, e2e_regime=e2e_regime, **kwargs)
         
         self.vsn = VariableSelectionNetwork(1, input_dim, hidden_dim, dropout)
         self.lstm_encoder = nn.LSTM(hidden_dim, hidden_dim, num_layers, batch_first=True)
@@ -1062,7 +1082,9 @@ def get_model(model_type, input_dim, num_assets, device='cpu',
               omega_mode='learnable', sigma_mode='prior', lambda_risk=0.0,
               hidden_dim=64, regime_dim=0, macro_dim=0, max_bil_floor=0.5,
               dist_type='t', t_df=5.0, e2e_regime=False,
-              gate_hidden=16):
+              gate_hidden=16,
+              group_masks=None, group_caps=None, group_floors=None,
+              learnable_t_df=False, t_df_prior=None):
     """
     모델 팩토리 함수 (v5: dual_shock_expert 추가).
     """
@@ -1106,6 +1128,17 @@ def get_model(model_type, input_dim, num_assets, device='cpu',
         kwargs['macro_dim'] = macro_dim
         kwargs['max_bil_floor'] = max_bil_floor
         kwargs['e2e_regime'] = e2e_regime
+
+    # Forward the new P2.1 / P2.2 kwargs — every encoder accepts **kwargs.
+    for k, v in (
+        ('group_masks', group_masks),
+        ('group_caps', group_caps),
+        ('group_floors', group_floors),
+        ('learnable_t_df', learnable_t_df),
+        ('t_df_prior', t_df_prior),
+    ):
+        if v is not None or k == 'learnable_t_df':
+            kwargs[k] = v
 
     return model_map[model_type](**kwargs).to(device)
 
