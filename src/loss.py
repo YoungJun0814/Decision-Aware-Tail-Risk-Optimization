@@ -446,6 +446,84 @@ class PathAwareMDDLoss(nn.Module):
 
 
 # =============================================================================
+# SoftPathMDDLoss — Differentiable MDD via logsumexp (P1.4)
+# =============================================================================
+
+class SoftPathMDDLoss(nn.Module):
+    """Fully differentiable path-MDD surrogate.
+
+    ``PathAwareMDDLoss`` above relies on ``cummax`` and ``topk`` which have
+    piecewise-zero subgradients: for most inputs only a single time index
+    receives gradient. That is fine as a hinge-style regulariser but it
+    produces a sparse, biased signal when MDD itself is the quantity we
+    want gradients through (cf. P1.4 in the remediation plan).
+
+    This class replaces both the running peak and the final max with a
+    soft, everywhere-smooth logsumexp surrogate:
+
+        soft_peak_t = (1/beta) * logsumexp(beta * log_cum_ret_{<=t})
+        soft_dd_t   = log_cum_ret_t - soft_peak_t       (<= 0 always)
+        soft_mdd    = -(1/beta) * logsumexp(-beta * soft_dd_t)
+
+    All operations are differentiable and every time step contributes a
+    non-zero gradient, with weight decaying smoothly away from the actual
+    peak/trough. As ``beta -> inf`` the surrogate recovers the hard MDD.
+
+    Working in *log-wealth* space makes the running peak additive and
+    numerically stable; the final MDD is reported back as a simple-return
+    drawdown via ``1 - exp(soft_dd)``.
+    """
+
+    def __init__(
+        self,
+        mdd_target: float = -0.10,
+        mdd_lambda: float = 5.0,
+        soft_margin: float = 0.02,
+        beta: float = 40.0,
+    ):
+        super().__init__()
+        self.mdd_target = mdd_target
+        self.mdd_lambda = mdd_lambda
+        self.soft_margin = soft_margin
+        self.beta = beta
+
+    def soft_mdd(self, path_returns: torch.Tensor) -> torch.Tensor:
+        """Return a differentiable estimate of path MDD as a positive drawdown."""
+        if path_returns.shape[0] < 2:
+            return torch.zeros((), device=path_returns.device, dtype=path_returns.dtype)
+        beta = self.beta
+        # log-wealth: stable cumulative sum of log(1 + r)
+        log_w = torch.cumsum(torch.log1p(path_returns), dim=0)  # (T,)
+
+        # Soft running peak via cumulative logsumexp.
+        # We use torch.logcumsumexp if available (PyTorch >= 1.8); fall back
+        # otherwise. Running peak(t) = (1/beta) * logcumsumexp(beta * log_w)[t].
+        if hasattr(torch, "logcumsumexp"):
+            soft_peak = torch.logcumsumexp(beta * log_w, dim=0) / beta
+        else:  # pragma: no cover — modern torch always has this
+            cummax_stable = torch.cummax(beta * log_w, dim=0).values
+            soft_peak = (
+                cummax_stable
+                + torch.log(
+                    torch.cumsum(torch.exp(beta * log_w - cummax_stable), dim=0)
+                )
+            ) / beta
+
+        soft_dd_log = log_w - soft_peak   # <= 0 for every t
+        # Max of (-soft_dd_log) smoothly via logsumexp.
+        soft_mdd_log = torch.logsumexp(-beta * soft_dd_log, dim=0) / beta
+        # Back to simple-return space: drawdown = 1 - exp(soft_dd); soft_mdd_log
+        # is the smoothed |soft_dd|, so return 1 - exp(-soft_mdd_log).
+        return 1.0 - torch.exp(-soft_mdd_log)
+
+    def forward(self, path_returns: torch.Tensor) -> torch.Tensor:
+        mdd = self.soft_mdd(path_returns)
+        threshold = -self.mdd_target + self.soft_margin  # e.g. 0.08
+        hinge = F.relu(mdd - threshold)
+        return self.mdd_lambda * hinge
+
+
+# =============================================================================
 # SharpeLoss — Direct Sharpe Maximization (v3)
 # =============================================================================
 
