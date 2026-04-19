@@ -19,7 +19,7 @@ Do not treat those older docs as reproducible specifications until the missing a
 | Referenced Path | Exists in repo? | Notes |
 |---|---|---|
 | `src/gen_regime_4state.py` | ✅ | Fits HMM on **full 2007–2025 sample** → has look-ahead bias. |
-| `src/gen_regime_4state_pit.py` | ❌ | **Does not exist.** P0.1 of the remediation plan implements it. |
+| `src/gen_regime_4state_pit.py` | ✅ | Added in P0.1. Per-month refit in OOS period; pre-OOS uses a single train-only fit. |
 | `scripts/run_correlation_guard_v7_exclusion.py` | ✅ | Dispatcher loads the two scripts below via `importlib.util.spec_from_file_location`. |
 | `scripts/run_correlation_guard_v8_tiered.py` | ✅ | |
 | `scripts/run_phase18_paper_safe_ablation.py` | ❌ | Imported by the Guard v7 dispatcher. Every end-to-end run of the overlay **will fail at import**. |
@@ -36,7 +36,7 @@ Do not treat those older docs as reproducible specifications until the missing a
 | Referenced Path | Exists? | Notes |
 |---|---|---|
 | `data/processed/regime_4state.csv` | ✅ | Produced by `gen_regime_4state.py`; full-sample HMM (look-ahead). |
-| `data/processed/regime_4state_pit.csv` | ❌ | **Missing.** `data_loader.get_regime_4state()` silently falls back to the look-ahead CSV. Every downstream claim of "PIT-safe" is therefore unsupported by the pushed code. |
+| `data/processed/regime_4state_pit.csv` | ⏳ | Generator code landed in P0.1. The CSV itself must be produced by running `python -m src.gen_regime_4state_pit` (requires network access for yfinance). `data_loader.get_regime_4state(require_pit=True)` now raises if the file is absent; the default path warns loudly on fallback. |
 | `data/processed/prob_data.csv` | ✅ | |
 | `data/processed/regime_comparison.csv` | ✅ | |
 
@@ -72,8 +72,8 @@ See [REMEDIATION_PLAN.md](REMEDIATION_PLAN.md). P0 in flight:
 
 - [x] **P0.2** — Encoder argument plumbing fixed (`aa36bd2`).
 - [x] **P0.3** — `batch_tail_mean` vs distributional CVaR disambiguated (`3635252`).
-- [ ] **P0.4** — This document is step 1; step 2 is either pushing the missing scripts from the author's local workspace or rewriting the dependent docs.
-- [ ] **P0.1** — Implement real PIT-HMM (`gen_regime_4state_pit.py` + per-fold refit) and rerun headline experiments.
+- [x] **P0.4** — Drift-notice banners + REPO_STATUS.md + actionable errors in guard dispatchers (`c31f2f5`).
+- [x] **P0.1** — `src/gen_regime_4state_pit.py` implemented; `--pit_hmm` now hard-fails without the PIT CSV. **Next:** run the generator to produce the CSV and rerun headline experiments for a PIT-vs-non-PIT comparison.
 
 ## What a Reader Should Do
 

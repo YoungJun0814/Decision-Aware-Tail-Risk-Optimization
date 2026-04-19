@@ -833,8 +833,9 @@ def main():
         macro_tensor = macro_tensor[:n_samples]
     
     # --- 4-State Regime 확률 ---
+    # --pit_hmm forbids silent fallback to the full-sample HMM (P0.1).
     print("\n[Step 1b] Loading 4-State Regime Probabilities...")
-    regime_df = get_regime_4state()
+    regime_df = get_regime_4state(require_pit=bool(getattr(args, 'pit_hmm', False)))
     
     if regime_df.empty:
         print("  [FALLBACK] Uniform regime probs")

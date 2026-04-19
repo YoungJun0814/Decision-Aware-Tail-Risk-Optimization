@@ -261,28 +261,58 @@ def get_regime_proba() -> pd.DataFrame:
     return regime_proba
 
 
-def get_regime_4state() -> pd.DataFrame:
-    """
-    4-state Hierarchical HMM Regime 확률 로드.
-    
-    Columns: Prob_Bull, Prob_Sideways, Prob_Correction, Prob_Crisis
-    생성: python -m src.gen_regime_4state
-    """
-    regime_path = REGIME_4STATE_PIT_PATH if REGIME_4STATE_PIT_PATH.exists() else REGIME_4STATE_PATH
+def get_regime_4state(require_pit: bool = False) -> pd.DataFrame:
+    """Load 4-state hierarchical HMM regime probabilities.
 
-    if not regime_path.exists():
-        print(f"[WARNING] 4-state Regime 데이터가 없습니다: {REGIME_4STATE_PATH}")
-        print("[INFO] 'python -m src.gen_regime_4state' 명령으로 생성하세요.")
-        return pd.DataFrame()
-    
-    print(f"[INFO] 4-state Regime 확률 로드 중...")
+    Parameters
+    ----------
+    require_pit : bool
+        If True, load only the point-in-time (PIT) CSV produced by
+        ``src.gen_regime_4state_pit``. Missing the PIT file is a hard
+        FileNotFoundError — no silent fallback to the full-sample HMM
+        (which has look-ahead bias).
+
+        If False (default, legacy behaviour), prefer the PIT file when
+        present and fall back to the full-sample CSV with a loud warning
+        stamped on stdout so the caller can see which source was used.
+
+    Columns returned: ``Prob_Bull``, ``Prob_Sideways``,
+    ``Prob_Correction``, ``Prob_Crisis``.
+    """
+    if require_pit:
+        if not REGIME_4STATE_PIT_PATH.exists():
+            raise FileNotFoundError(
+                "require_pit=True but PIT regime CSV is missing: "
+                f"{REGIME_4STATE_PIT_PATH}\n"
+                "Generate it with: python -m src.gen_regime_4state_pit\n"
+                "See docs/REMEDIATION_PLAN.md section P0.1."
+            )
+        regime_path = REGIME_4STATE_PIT_PATH
+    else:
+        if REGIME_4STATE_PIT_PATH.exists():
+            regime_path = REGIME_4STATE_PIT_PATH
+        elif REGIME_4STATE_PATH.exists():
+            regime_path = REGIME_4STATE_PATH
+            print(
+                "[WARNING] PIT regime CSV not found; falling back to "
+                f"full-sample HMM at {regime_path}. This CSV HAS "
+                "look-ahead bias (HMM fit on the entire 2007-2025 range). "
+                "Pass require_pit=True or regenerate via "
+                "'python -m src.gen_regime_4state_pit' to fix."
+            )
+        else:
+            print(f"[WARNING] 4-state Regime 데이터가 없습니다: {REGIME_4STATE_PATH}")
+            print("[INFO] 'python -m src.gen_regime_4state_pit' 명령으로 생성하세요.")
+            return pd.DataFrame()
+
+    print(f"[INFO] 4-state Regime 확률 로드 중... ({regime_path.name})")
     if regime_path == REGIME_4STATE_PIT_PATH:
         print("[INFO] PIT 4-state Regime file detected: regime_4state_pit.csv")
     df = pd.read_csv(regime_path, parse_dates=['Date'], index_col='Date')
-    
+
     prob_cols = ['Prob_Bull', 'Prob_Sideways', 'Prob_Correction', 'Prob_Crisis']
     result = df[prob_cols]
-    
+
     print(f"[INFO] 4-state Regime 기간: {result.index[0].date()} ~ {result.index[-1].date()}")
     return result
 
