@@ -68,12 +68,56 @@ Upstream-only artifacts (walk-forward results in `results_runpod/walkforward/`) 
 
 ## Active Remediation
 
-See [REMEDIATION_PLAN.md](REMEDIATION_PLAN.md). P0 in flight:
+See [REMEDIATION_PLAN.md](REMEDIATION_PLAN.md). P0 / P1 / P2 code status:
 
+- [x] **P0.1** — `src/gen_regime_4state_pit.py` implemented; `--pit_hmm` hard-fails without the PIT CSV (`433c953`). **CSV itself is not yet generated** — see user-side rerun steps below.
 - [x] **P0.2** — Encoder argument plumbing fixed (`aa36bd2`).
 - [x] **P0.3** — `batch_tail_mean` vs distributional CVaR disambiguated (`3635252`).
 - [x] **P0.4** — Drift-notice banners + REPO_STATUS.md + actionable errors in guard dispatchers (`c31f2f5`).
-- [x] **P0.1** — `src/gen_regime_4state_pit.py` implemented; `--pit_hmm` now hard-fails without the PIT CSV. **Next:** run the generator to produce the CSV and rerun headline experiments for a PIT-vs-non-PIT comparison.
+- [x] **P1.1** — Deflated Sharpe + White Reality Check in `src/stats/post_selection.py` (`27d6587`).
+- [x] **P1.2** — Tournament-level bootstrap in `src/stats/bootstrap.py` (`6acc1c8`).
+- [x] **P1.3** — Nested walk-forward splits in `src/cv/nested.py`, `--nested` CLI flag logs the leakage-free plan (`9f1dbe0`). **Trainer consumption is still staged** — the tuner does not yet refit on inner folds.
+- [x] **P1.4** — `SoftPathMDDLoss` (logsumexp surrogate) in `src/loss.py`, wired via `--soft-mdd` (`e320d84`, `2da3cfd`).
+- [x] **P2.1** — Group constraints internalised in `CVaROptimizationLayer`, plumbed via `--group-masks` (`98b5dce`, `2da3cfd`).
+- [x] **P2.2** — `RegimeAdaptiveTDf` attached to model via `--learnable-t-df` (`80d22bf`, `2da3cfd`).
+- [x] **P2.5** — `scripts/run_ablation_ladder.py` (`bbe1bef`).
+- [x] **Post-selection reporter** — `scripts/report_post_selection.py` (`664d839`).
+
+### What still requires a user-side rerun
+
+The *tools* above are committed and tested, but the thesis headline
+numbers in `README.md` and `TRIPLE_TARGET_RESULTS.md` (Sharpe 1.0724 /
+MDD −9.44% / bootstrap 57.98%) were computed with full-sample HMM,
+scalar `t_df=5`, overlay-applied group caps, and no post-selection
+correction. To refresh them:
+
+1. **Generate the PIT regime CSV** (requires network; runs `yfinance`):
+
+       python -m src.gen_regime_4state_pit
+
+2. **Rerun walk-forward with the new knobs on** (GPU recommended):
+
+       python run_walkforward.py \
+           --pit_hmm --soft-mdd --learnable-t-df \
+           --group-masks data/processed/group_masks.csv \
+           --group-caps 0.65,0.55,0.30 \
+           --output-dir results/walkforward_v2/
+
+3. **Compute post-selection statistics** on the new port returns:
+
+       python scripts/report_post_selection.py \
+           --port-returns results/walkforward_v2/port_returns.csv \
+           --candidates   results/tournament_v2/candidates.csv \
+           --threshold    -0.10 \
+           --out          results/walkforward_v2/post_selection/
+
+4. Replace the headline table in `README.md` /
+   `docs/THESIS_CURRENT_MODEL_PIPELINE.md` with the post-selection
+   (DSR + tournament-bootstrap) numbers alongside the raw Sharpe.
+
+Steps 1 and 2 cannot be done in the remediation worktree because they
+require network and GPU; once they complete, step 3 is deterministic and
+the report output is what the thesis should cite.
 
 ## What a Reader Should Do
 
