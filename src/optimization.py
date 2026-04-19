@@ -43,15 +43,33 @@ class CVaROptimizationLayer(nn.Module):
         safety_threshold: 위기 시 최소 확보해야 할 BIL 비중
     """
     def __init__(
-        self, 
-        num_assets: int, 
-        num_scenarios: int = 200, 
+        self,
+        num_assets: int,
+        num_scenarios: int = 200,
         confidence_level: float = 0.95,
         bil_index: int = 4,
         safety_threshold: float = 0.5,
         dist_type: str = 't',
         t_df: int = 5,
+        group_masks=None,
+        group_caps=None,
+        group_floors=None,
     ):
+        """
+        Group constraints (P2.1)
+        ------------------------
+        Previously equity / bond / alternatives caps were applied by the
+        Phase-18 overlay *after* the CVaR solve, which produced a
+        non-homomorphic policy (upstream ignored constraints the downstream
+        then enforced by re-weighting). Internalising the caps makes the
+        CVaR solution constraint-consistent.
+
+        ``group_masks`` : (K, N) 0/1 numpy array. Row k selects assets in
+            group k (e.g. equities, bonds, alternatives).
+        ``group_caps``  : (K,) upper bounds on group weights. ``None`` to
+            disable the upper bound on that group.
+        ``group_floors``: (K,) lower bounds; ``None`` to disable.
+        """
         super(CVaROptimizationLayer, self).__init__()
         self.num_assets = num_assets
         self.num_scenarios = num_scenarios
@@ -61,6 +79,30 @@ class CVaROptimizationLayer(nn.Module):
         self.dist_type = dist_type
         self.t_df = t_df
         self._fallback_count = 0
+
+        self.group_masks = None
+        self.group_caps = None
+        self.group_floors = None
+        if group_masks is not None:
+            gm = np.asarray(group_masks, dtype=float)
+            if gm.ndim != 2 or gm.shape[1] != num_assets:
+                raise ValueError(
+                    f"group_masks must have shape (K, {num_assets}); got {gm.shape}"
+                )
+            if ((gm != 0.0) & (gm != 1.0)).any():
+                raise ValueError("group_masks must be 0/1")
+            self.group_masks = gm
+            K = gm.shape[0]
+            if group_caps is not None:
+                gc = np.asarray(group_caps, dtype=float)
+                if gc.shape != (K,):
+                    raise ValueError(f"group_caps must have shape ({K},)")
+                self.group_caps = gc
+            if group_floors is not None:
+                gf = np.asarray(group_floors, dtype=float)
+                if gf.shape != (K,):
+                    raise ValueError(f"group_floors must have shape ({K},)")
+                self.group_floors = gf
         
         self.cvxpy_layer = None
         
@@ -117,7 +159,15 @@ class CVaROptimizationLayer(nn.Module):
         # 안전망 제약조건 (조건부 활성화)
         # is_crisis 파라미터와 곱하여 플래그가 켜졌을 때만 제약이 걸리도록 함
         constraints.append(w[self.bil_index] >= self.safety_threshold * is_crisis)
-        
+
+        # P2.1: group constraints (constants, so DPP is preserved).
+        if self.group_masks is not None:
+            A = self.group_masks  # (K, N)
+            if self.group_caps is not None:
+                constraints.append(A @ w <= self.group_caps)
+            if self.group_floors is not None:
+                constraints.append(A @ w >= self.group_floors)
+
         # 문제 및 레이어 생성
         problem = cp.Problem(objective, constraints)
         assert problem.is_dpp()
